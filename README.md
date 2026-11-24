@@ -1,5 +1,7 @@
 # Slatt
 
+<img src="slatt.png" alt="Slatt logo" width="160">
+
 Slatt is a standalone language for writing bytecode lifting rules and
 instruction passes. A `.slatt` file defines opcode maps and passes. A `.pfir`
 file contains typed prototypes and basic blocks. Slatt can import compiled
