@@ -1,0 +1,18 @@
+pass simplify {
+  fold constants;
+
+  match [BR_EQ($left, $right, $yes, $no)]
+    where const($left) == const($right) => [JUMP($yes)],
+    where const($left) != const($right) => [JUMP($no)];
+
+  match [BR_LT($left, $right, $yes, $no)]
+    where const($left) < const($right) => [JUMP($yes)],
+    where const($left) >= const($right) => [JUMP($no)];
+
+  match [BR_LE($left, $right, $yes, $no)]
+    where const($left) <= const($right) => [JUMP($yes)],
+    where const($left) > const($right) => [JUMP($no)];
+
+  prune unreachable;
+  dce;
+}

@@ -1,0 +1,15 @@
+// The sample VM stores constant values before register numbers.
+map toy_vm {
+  41 => LOADK($1, $0);
+  52 => XOR32($0, $1, $2);
+  17 => BR_EQ($0, $1, $2, $3);
+  99 => RETURN($0);
+}
+
+pass simplify {
+  fold constants;
+
+  match [BR_EQ($left, $right, $yes, $no)]
+    where const($left) == const($right) => [JUMP($yes)],
+    where const($left) != const($right) => [JUMP($no)];
+}

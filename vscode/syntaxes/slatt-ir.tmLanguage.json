@@ -1,0 +1,5 @@
+{
+  "name": "Slatt IR",
+  "scopeName": "source.slatt-ir",
+  "patterns": [{ "include": "source.slatt" }]
+}

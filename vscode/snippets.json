@@ -1,0 +1,19 @@
+{
+  "Slatt pass": {
+    "prefix": "pass",
+    "body": ["pass ${1:simplify} {", "  $0", "}"]
+  },
+  "Guarded equality rewrite": {
+    "prefix": "match-eq",
+    "body": [
+      "match [BR_EQ(\\$left, \\$right, \\$yes, \\$no)]",
+      "  where const(\\$left) == const(\\$right) => [JUMP(\\$yes)],",
+      "  where const(\\$left) != const(\\$right) => [JUMP(\\$no)];",
+      "$0"
+    ]
+  },
+  "Opcode map": {
+    "prefix": "map",
+    "body": ["map ${1:custom_vm} {", "  ${2:41} => LOADK(\\$1, \\$0);", "  $0", "}"]
+  }
+}

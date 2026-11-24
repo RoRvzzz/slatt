@@ -1,0 +1,14 @@
+raw proto demo using toy_vm {
+  @entry:
+    41(91, r0);
+    41(55, r1);
+    52(r2, r0, r1);
+    52(r2, r2, r1);
+    17(r0, r2, @yes, @no);
+  @yes:
+    41("expected branch", r3);
+    99(r3);
+  @no:
+    41("decoy branch", r3);
+    99(r3);
+}

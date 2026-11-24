@@ -1,0 +1,29 @@
+{
+  "name": "Slatt",
+  "scopeName": "source.slatt",
+  "patterns": [
+    { "name": "comment.line.double-slash.slatt", "match": "//.*$" },
+    {
+      "name": "string.quoted.double.slatt",
+      "begin": "\"",
+      "end": "\"|$",
+      "patterns": [{ "name": "constant.character.escape.slatt", "match": "\\\\(?:x[0-9a-fA-F]{2}|u\\{[0-9a-fA-F]+\\}|.)" }]
+    },
+    {
+      "match": "\\b(pass|map|proto)\\s+([A-Za-z_][A-Za-z_0-9]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.slatt" },
+        "2": { "name": "entity.name.function.slatt" }
+      }
+    },
+    { "name": "keyword.control.slatt", "match": "\\b(?:pass|map|proto|raw|using|match|where|and|fold|constants|prune|unreachable|dce)\\b" },
+    { "name": "support.function.builtin.slatt", "match": "\\b(?:const|known|bits)\\b(?=\\s*\\()" },
+    { "name": "support.function.opcode.slatt", "match": "\\b(?:LOADK|MOVE|ADD|SUB|MUL|DIV|XOR32|JUMP|BR_TRUE|BR_EQ|BR_LT|BR_LE|RETURN|NATIVE|NATIVE_BRANCH|NATIVE_RETURN)\\b(?=\\s*\\()" },
+    { "name": "variable.parameter.slatt", "match": "\\$(?:[A-Za-z_][A-Za-z_0-9]*|[0-9]+)\\b" },
+    { "name": "entity.name.label.slatt", "match": "@[A-Za-z_][A-Za-z_0-9]*\\b" },
+    { "name": "variable.other.register.slatt", "match": "\\br[0-9]+\\b" },
+    { "name": "constant.language.slatt", "match": "\\b(?:true|false|nil)\\b" },
+    { "name": "constant.numeric.slatt", "match": "(?<![A-Za-z_0-9])-?[0-9]+(?:\\.[0-9]*)?(?:[Ee][+-]?[0-9]+)?" },
+    { "name": "keyword.operator.slatt", "match": "=>|==|!=|<=|>=|<|>" }
+  ]
+}

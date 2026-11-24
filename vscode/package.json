@@ -1,0 +1,50 @@
+{
+  "name": "slatt",
+  "displayName": "Slatt",
+  "description": "Syntax highlighting, completion, and compiler diagnostics for Slatt.",
+  "version": "0.2.0",
+  "publisher": "RoRvzzz",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Programming Languages"],
+  "repository": { "type": "git", "url": "https://github.com/RoRvzzz/slatt.git" },
+  "main": "./extension.js",
+  "scripts": { "test": "node --test" },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Live diagnostics invoke the Slatt compiler in trusted workspaces."
+    }
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "slatt",
+        "aliases": ["Slatt"],
+        "extensions": [".slatt", ".slat"],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "slatt-ir",
+        "aliases": ["Slatt IR"],
+        "extensions": [".pfir"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      { "language": "slatt", "scopeName": "source.slatt", "path": "./syntaxes/slatt.tmLanguage.json" },
+      { "language": "slatt-ir", "scopeName": "source.slatt-ir", "path": "./syntaxes/slatt-ir.tmLanguage.json" }
+    ],
+    "snippets": [{ "language": "slatt", "path": "./snippets.json" }],
+    "configuration": {
+      "title": "Slatt",
+      "properties": {
+        "slatt.executablePath": {
+          "type": "string",
+          "default": "slatt",
+          "scope": "machine",
+          "description": "Slatt executable used for live diagnostics. Use a full path or a name on PATH."
+        }
+      }
+    }
+  }
+}
