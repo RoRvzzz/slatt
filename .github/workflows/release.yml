@@ -24,6 +24,7 @@ concurrency:
 jobs:
   windows:
     runs-on: windows-2025
+    timeout-minutes: 15
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
@@ -82,6 +83,7 @@ jobs:
 
       - name: Package the CLI and VS Code extension
         shell: pwsh
+        timeout-minutes: 5
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           New-Item -ItemType Directory dist | Out-Null
@@ -89,9 +91,12 @@ jobs:
           $version = $env:RELEASE_TAG.Substring(1)
           Push-Location vscode
           try {
-            npx --yes '@vscode/vsce@3.7.1' package --no-dependencies --out "../dist/slatt-vscode-$version.vsix"
+            npx --yes '@vscode/vsce@3.7.1' package --no-dependencies --skip-license --out "../dist/slatt-vscode-$version.vsix"
           } finally {
             Pop-Location
+          }
+          if (!(Test-Path -LiteralPath "dist/slatt-vscode-$version.vsix" -PathType Leaf)) {
+            throw 'VSIX packaging did not produce an asset'
           }
 
       - uses: actions/upload-artifact@v4
