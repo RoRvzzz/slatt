@@ -1,6 +1,8 @@
 # Slatt
 
-<img src="slatt.png" alt="Slatt logo" width="160">
+<p align="center">
+  <img src="slatt.png" alt="Slatt logo" width="160">
+</p>
 
 Slatt is a standalone language for writing bytecode lifting rules and
 instruction passes. A `.slatt` file defines opcode maps and passes. A `.pfir`
@@ -60,6 +62,13 @@ opcode and keyword completion, and snippets for `.slatt` files. The extension
 also highlights `.pfir` files. For live rule diagnostics, put `slatt` on `PATH`
 or set **Slatt: Executable Path**. The extension uses `slatt check -` on the
 current editor buffer. [Releases](https://github.com/RoRvzzz/slatt/releases)
+
+## Release builds
+
+Version tags trigger the **Windows release** workflow, which builds the CLI
+ZIP and VSIX on a GitHub-hosted runner. The workflow also accepts an existing
+tag for a test build and stores the resulting packages as Actions artifacts.
+Enable **Publish** on the manual run to upload them to GitHub Releases.
 
 ## Work with compiled bytecode
 

@@ -1,0 +1,116 @@
+name: Windows release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to build
+        required: true
+        type: string
+      publish:
+        description: Publish the generated assets to the tag's release
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Verify runner and tag
+        shell: pwsh
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_ARCH -ne 'X64') {
+            throw 'Release builds require a GitHub-hosted x64 runner'
+          }
+          if ($env:RELEASE_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$') {
+            throw 'Expected a version tag such as v0.2.0'
+          }
+
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build and test Slatt
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup toolchain install stable --profile minimal
+          $env:CARGO_PROFILE_RELEASE_DEBUG = '0'
+          $env:CARGO_PROFILE_RELEASE_STRIP = 'symbols'
+          $prefixes = @($env:USERPROFILE, $env:CARGO_HOME, $env:GITHUB_WORKSPACE)
+          $paths = foreach ($prefix in $prefixes) {
+            if ($prefix) {
+              @($prefix, $prefix.Replace('\', '/'), $prefix.Replace('/', '\')) | Select-Object -Unique
+            }
+          }
+          $flags = $paths | ForEach-Object { "--remap-path-prefix=$_=/slatt-build" }
+          $env:CARGO_ENCODED_RUSTFLAGS = $flags -join [char]31
+          cargo +stable test --release --locked
+          cargo +stable build --release --locked
+          $exe = (Resolve-Path 'target/release/slatt.exe').Path
+          $version = $env:RELEASE_TAG.Substring(1)
+          if ((& $exe --version) -cne "slatt $version" -or
+              (Get-Content vscode/package.json -Raw | ConvertFrom-Json).version -cne $version) {
+            throw 'Release tag, CLI version and extension version must match'
+          }
+          $env:SLATT_TEST_EXE = $exe
+          node --test vscode/check.test.js
+          $binary = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($exe))
+          foreach ($path in $paths) {
+            $wide = [Text.Encoding]::Latin1.GetString([Text.Encoding]::Unicode.GetBytes($path))
+            if ($binary.Contains($path, [StringComparison]::OrdinalIgnoreCase) -or
+                $binary.Contains($wide, [StringComparison]::OrdinalIgnoreCase)) {
+              throw 'Release executable still embeds a build-machine path'
+            }
+          }
+
+      - name: Package the CLI and VS Code extension
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          New-Item -ItemType Directory dist | Out-Null
+          Compress-Archive -LiteralPath 'target/release/slatt.exe' -DestinationPath 'dist/slatt-windows-x64.zip'
+          $version = $env:RELEASE_TAG.Substring(1)
+          Push-Location vscode
+          try {
+            npx --yes '@vscode/vsce@3.7.1' package --no-dependencies --out "../dist/slatt-vscode-$version.vsix"
+          } finally {
+            Pop-Location
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slatt-${{ env.RELEASE_TAG }}-windows
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Publish to GitHub Releases
+        if: github.event_name == 'push' || inputs.publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = @(Get-ChildItem -LiteralPath dist -File | ForEach-Object FullName)
+          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json tagName 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:RELEASE_TAG @assets --repo $env:GITHUB_REPOSITORY --clobber
+          } else {
+            gh release create $env:RELEASE_TAG @assets --repo $env:GITHUB_REPOSITORY --verify-tag --generate-notes
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub release upload failed' }
