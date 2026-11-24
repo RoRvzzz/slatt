@@ -1,0 +1,207 @@
+frontend
+// shortcut: finite 1.x table dispatch with constant lookups and explicit handler exits.
+if !source.sub_string(0,256).contains("MoonVeil Obfuscator") { throw "MoonVeil 1.x banner required"; }
+
+fn expect(tokens, at, pattern) {
+    for item in pattern {
+        if at >= tokens.len || tokens[at] != item {
+            throw "unexpected MoonVeil token at " + at.to_string() + ", expected " + item;
+        }
+        at += 1;
+    }
+    at
+}
+fn signed_integer(tokens, at) {
+    let sign = 1;
+    if tokens[at] == "-" { sign = -1; at += 1; }
+    else if tokens[at] == "+" { at += 1; }
+    let digits = bytes(tokens[at]);
+    let n = 0;
+    if digits.len == 0 || digits.len > 14 { throw "non-integral MoonVeil state"; }
+    for i in 0..digits.len {
+        let digit = digits[i] - 48;
+        if digit < 0 || digit > 9 { throw "non-integral MoonVeil state"; }
+        n = n * 10 + digit;
+    }
+    [sign * n, at + 1]
+}
+fn optional_separator(tokens, at) {
+    if at < tokens.len && tokens[at] == ";" { return at + 1; }
+    at
+}
+fn lookup_arg(tokens, at, lookup, values, bias) {
+    at = expect(tokens, at, [lookup,"("]);
+    let number = signed_integer(tokens, at);
+    at = expect(tokens, number[1], [")"]);
+    let result = values[(number[0] + bias).to_string()];
+    if result == () { throw "missing MoonVeil lookup entry"; }
+    [result, at]
+}
+
+fn lua_literal_bytes(literal) {
+    let raw = bytes(literal);
+    let out = [];
+    let at = 1;
+    while at < raw.len - 1 {
+        let byte = raw[at];
+        at += 1;
+        if byte != 92 { out.push(byte); continue; }
+        let next = raw[at];
+        if next >= 48 && next <= 57 {
+            let start = at;
+            let n = 0;
+            while at < raw.len-1 && at < start+3 && raw[at] >= 48 && raw[at] <= 57 {
+                n = n*10 + raw[at]-48; at += 1;
+            }
+            if n > 255 { throw "invalid MoonVeil numeric escape"; }
+            out.push(n);
+        } else {
+            let escapes = #{n:10,r:13,t:9};
+            let decoded = escapes[byte_char(next).to_string()];
+            if decoded != () { out.push(decoded); }
+            else if [34,39,92].contains(next) { out.push(next); }
+            else { throw "unsupported MoonVeil string escape"; }
+            at += 1;
+        }
+    }
+    out
+}
+fn xor_literal(data, key) {
+    let cipher = lua_literal_bytes(data);
+    let key = lua_literal_bytes(key);
+    if key.len == 0 { throw "empty MoonVeil XOR key"; }
+    let result = "\"";
+    for i in 0..cipher.len {
+        let byte = cipher[i] ^ key[i % key.len];
+        if byte >= 32 && byte <= 126 && byte != 34 && byte != 92 {
+            result += byte_char(byte);
+        } else {
+            result += "\\" + (byte/100).to_string() + (byte/10%10).to_string() + (byte%10).to_string();
+        }
+    }
+    result + "\""
+}
+fn decode_loader(tokens) {
+    if tokens.len < 20 || tokens.len > 4000 { return (); }
+    let args = [];
+    for i in 3..(tokens.len-3) {
+        if tokens[i-3]=="end" && tokens[i-2]==")" && tokens[i-1]=="(" && tokens[i+1]=="," &&
+           tokens[i+3]==")" && tokens[i].starts_with("'") && tokens[i+2].starts_with("'") {
+            args.push(tokens[i]); args.push(tokens[i+2]); tokens[i]="<data>"; tokens[i+2]="<key>";
+        }
+    }
+    if args.len != 10 { return (); }
+    let template = "";
+    for token in tokens { template += token + " "; }
+    // shortcut: only this audited loader skeleton has a proved lookup and call order.
+    if sha256(template) != "2523ddeab5c3a7b4f3d3f87e7fa38aa94532adfbb305cf007785eae44398b9ba" { return (); }
+    let decoded = [];
+    for i in range(0,args.len,2) { decoded.push(xor_literal(args[i],args[i+1])); }
+    if decoded[0] != "\"loadstring\"" || decoded[1] != "\"game\"" ||
+       decoded[2] != "\"HttpGet\"" || decoded[3] != "\"game\"" {
+        throw "unsupported MoonVeil loader operands";
+    }
+    "local environment = getfenv()\nenvironment.loadstring(environment.game.HttpGet(environment.game, " +
+        decoded[4] + "))()\n"
+}
+
+let tokens = lua_token_list(source);
+let loader = decode_loader(tokens);
+if loader != () { return loader; }
+if tokens.len < 20 { throw "truncated MoonVeil dispatcher"; }
+let scratch = tokens[1];
+let map = tokens[3];
+let lookup = tokens[5];
+let handlers = tokens[7];
+let state = tokens[9];
+let scaffold = [scratch,map,lookup,handlers,state];
+let names = #{};
+for name in scaffold {
+    if names.contains(name) { throw "duplicate MoonVeil binding"; }
+    names[name] = true;
+}
+let at = expect(tokens, 0, ["local",scratch,",",map,",",lookup,",",handlers,",",state]);
+at = expect(tokens, optional_separator(tokens,at), [scratch,"=","{","}"]);
+at = expect(tokens, optional_separator(tokens,at), [map,",",lookup,"=","{"]);
+let values = #{};
+while tokens[at] != "}" {
+    at = expect(tokens, at, ["["]);
+    let key = signed_integer(tokens, at);
+    at = expect(tokens, key[1], ["]","="]);
+    let value = signed_integer(tokens, at);
+    let name = key[0].to_string();
+    if values.contains(name) { throw "duplicate MoonVeil lookup key"; }
+    values[name] = value[0];
+    at = value[1];
+    if tokens[at] != "}" {
+        if tokens[at] != "," && tokens[at] != ";" { throw "invalid MoonVeil lookup separator"; }
+        at += 1;
+    }
+}
+at = expect(tokens, at, ["}",",","function","("]);
+let argument = tokens[at];
+if scaffold.contains(argument) { throw "MoonVeil lookup shadows its scaffold"; }
+at = expect(tokens, at, [argument,")","return",map,"[",argument]);
+let bias = 0;
+if tokens[at] == "+" || tokens[at] == "-" {
+    let sign = if tokens[at] == "+" { 1 } else { -1 };
+    let number = signed_integer(tokens, at+1);
+    bias = sign * number[0];
+    at = number[1];
+}
+at = expect(tokens, at, ["]"]);
+at = expect(tokens, optional_separator(tokens,at), ["end"]);
+at = expect(tokens, optional_separator(tokens,at), [handlers,"=","{"]);
+let transitions = #{};
+let bodies = #{};
+while tokens[at] != "}" {
+    at = expect(tokens, at, ["["]);
+    let key = signed_integer(tokens, at);
+    let name = key[0].to_string();
+    if bodies.contains(name) { throw "duplicate MoonVeil handler"; }
+    at = expect(tokens, key[1], ["]","=","function","(",")"]);
+    let body = "";
+    while at < tokens.len && tokens[at] != state {
+        if scaffold.contains(tokens[at]) ||
+            ["return","goto","getfenv","setfenv","debug"].contains(tokens[at]) {
+            throw "MoonVeil payload may alter dispatcher control or inspect its frame";
+        }
+        body += tokens[at] + " ";
+        at += 1;
+    }
+    at = expect(tokens, at, [state,"="]);
+    let next = lookup_arg(tokens, at, lookup, values, bias);
+    at = expect(tokens, optional_separator(tokens,next[1]), ["return","true"]);
+    at = expect(tokens, optional_separator(tokens,at), ["end"]);
+    bodies[name] = body;
+    transitions[name] = next[0];
+    if tokens[at] != "}" {
+        if tokens[at] != "," && tokens[at] != ";" { throw "invalid MoonVeil handler separator"; }
+        at += 1;
+    }
+}
+at = expect(tokens, at, ["}"]);
+at = expect(tokens, optional_separator(tokens,at), [state,"="]);
+let initial = lookup_arg(tokens, at, lookup, values, bias);
+at = expect(tokens, optional_separator(tokens,initial[1]), ["repeat","while","true","do",
+           scratch,"[","1","]","=",handlers,"[",state,"]"]);
+at = expect(tokens, optional_separator(tokens,at), ["if",scratch,"[","1","]","~=","nil","then",
+           "if",scratch,"[","1","]","(",")","then","break"]);
+at = expect(tokens, optional_separator(tokens,at), ["end","end","end","until",state,"=="]);
+let final_state = signed_integer(tokens, at);
+if optional_separator(tokens,final_state[1]) != tokens.len { throw "trailing MoonVeil statements"; }
+
+let current = initial[0];
+let visited = #{};
+let output = "";
+loop {
+    let name = current.to_string();
+    if visited.contains(name) { throw "cyclic MoonVeil dispatcher"; }
+    if !bodies.contains(name) { throw "missing MoonVeil handler"; }
+    visited[name] = true;
+    output += "do\n" + bodies[name] + "\nend\n";
+    current = transitions[name];
+    if current == final_state[0] { break; }
+}
+output
+%%

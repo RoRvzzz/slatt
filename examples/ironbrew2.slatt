@@ -1,0 +1,106 @@
+frontend
+// shortcut: straight-line dispatcher with string operands; extend with verified layouts.
+let text = source;
+text.replace("\r\n", "\n");
+text.trim();
+let marker = "local r=s('";
+let parts = text.split(marker);
+if parts.len != 2 { throw "IronBrew2 payload not found"; }
+let close = parts[1].index_of("')");
+if close < 0 { throw "unterminated IronBrew2 payload"; }
+if sha256(parts[0] + marker + parts[1].sub_string(close)) != "bd1a63a1f8ffee57b897614f24f6b029af17f61d8b687cb357a3bff21a628942" {
+    throw "unsupported IronBrew2 wrapper";
+}
+fn digit(byte) {
+    if byte >= 48 && byte <= 57 { return byte - 48; }
+    if byte >= 65 && byte <= 90 { return byte - 55; }
+    throw "invalid IronBrew2 base36 digit";
+}
+let encoded = bytes(parts[1].sub_string(0, close));
+let codes = [];
+let cursor = 0;
+while cursor < encoded.len {
+    let width = digit(encoded[cursor]);
+    cursor += 1;
+    if width < 1 || width > 8 || cursor + width > encoded.len { throw "invalid IronBrew2 code length"; }
+    let value = 0;
+    for j in 0..width { value = value * 36 + digit(encoded[cursor + j]); }
+    codes.push(value);
+    cursor += width;
+}
+if codes.len == 0 || codes[0] >= 256 { throw "invalid initial IronBrew2 code"; }
+let dictionary = [];
+for byte in 0..256 { dictionary.push([byte]); }
+let previous = dictionary[codes[0]];
+let image = [previous[0] ^ 229];
+for i in 1..codes.len {
+    let code = codes[i];
+    if code > dictionary.len { throw "unknown IronBrew2 dictionary entry"; }
+    let current = if code == dictionary.len { previous + [previous[0]] } else { dictionary[code] };
+    dictionary.push(previous + [current[0]]);
+    if current.len + image.len > 65536 { throw "IronBrew2 payload exceeds source frontend limit"; }
+    for byte in current { image.push(byte ^ 229); }
+    previous = current;
+}
+fn read(data, offset, width) {
+    if offset + width > data.len { throw "truncated IronBrew2 record"; }
+    let value = 0;
+    for j in 0..width { value |= data[offset+j] << (8*j); }
+    value
+}
+fn quote(data, offset, length) {
+    let s = "\"";
+    for j in 0..length {
+        let byte = read(data, offset+j, 1);
+        if byte >= 32 && byte <= 126 && byte != 34 && byte != 92 { s += byte_char(byte); }
+        else { s += "\\" + (byte/100).to_string() + (byte/10%10).to_string() + (byte%10).to_string(); }
+    }
+    s + "\""
+}
+let constants = [()];
+let count = read(image, 0, 4);
+if count > 1024 { throw "IronBrew2 constant pool exceeds source frontend limit"; }
+cursor = 4;
+for i in 0..count {
+    if read(image, cursor, 1) != 3 { throw "unsupported IronBrew2 constant tag"; }
+    let length = read(image, cursor+1, 4);
+    cursor += 5;
+    if cursor + length > image.len { throw "truncated IronBrew2 string"; }
+    constants.push(quote(image, cursor, length));
+    cursor += length;
+}
+if read(image, cursor, 1) != 0 { throw "unsupported IronBrew2 parameters"; }
+let instructions = read(image, cursor+1, 4);
+if instructions < 1 || instructions > 190 { throw "unsupported IronBrew2 instruction count"; }
+cursor += 5;
+let output = "local environment = (getfenv and getfenv()) or _ENV\n";
+let registers = #{};
+let returned = false;
+for pc in 0..instructions {
+    let flags = read(image,cursor,1);
+    let op = read(image,cursor+1,2);
+    let a = read(image,cursor+3,2);
+    let b = read(image,cursor+5,4);
+    cursor += 9;
+    if op == 1 || op == 3 || op == 6 || op == 7 {
+        if flags != 18 || b < 1 || b >= constants.len { throw "unsupported IronBrew2 load operands"; }
+        let expression = if op == 3 || op == 6 { "environment[" + constants[b] + "]" } else { constants[b] };
+        let name = "value" + (pc + 1).to_string();
+        registers[a.to_string()] = name;
+        output += "local " + name + " = " + expression + "\n";
+    } else if op == 0 || op == 5 {
+        let callable = registers[a.to_string()];
+        let argument = registers[(a+1).to_string()];
+        if flags != 0 || callable == () || argument == () { throw "unsupported IronBrew2 call operands"; }
+        output += callable + "(" + argument + ")\n";
+    } else if op == 2 || op == 4 {
+        if flags != 0 || pc != instructions-1 { throw "unsupported IronBrew2 return"; }
+        returned = true;
+    } else {
+        throw "unclassified IronBrew2 opcode";
+    }
+}
+if !returned { throw "missing IronBrew2 return"; }
+if read(image,cursor,4) != 0 || cursor + 4 != image.len { throw "unsupported IronBrew2 children or trailing bytes"; }
+output
+%%

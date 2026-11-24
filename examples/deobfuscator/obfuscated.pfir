@@ -1,0 +1,26 @@
+// Custom VM words with permuted opcode numbers and operand order.
+raw proto test_payload using test_vm vararg {
+  @entry:
+    168(r9);
+    87(101, r1);
+    87(64, r2);
+    16(r1, r2, r3);
+    87(37, r4);
+    74(r4, r4);
+    203(@dispatch, @decoy, r3, r4);
+  @decoy:
+    249(12345);
+    87(nil, r8);
+    44(r8, r8, r8);
+  @dispatch:
+    87(10, r6);
+    87(nil, r8);
+    51(r9, r6, @lower, @higher);
+  @lower:
+    87("low", r7);
+    44(r7, r8, r9);
+  @higher:
+    131(r9, r5, r6);
+    87("high", r7);
+    44(r7, r8, r5);
+}

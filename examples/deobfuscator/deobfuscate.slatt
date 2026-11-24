@@ -1,0 +1,23 @@
+map test_vm {
+  87 => LOADK($1, $0);
+  16 => XOR32($2, $0, $1);
+  203 => BR_EQ($3, $2, $0, $1);
+  51 => BR_LT($0, $1, $2, $3);
+  131 => ADD($1, $0, $2);
+  74 => MOVE($1, $0);
+  168 => VARARG($0);
+  44 => RETURN($2, $0, $1);
+  249 => NATIVE("test_vm.DECOY", $0);
+}
+
+pass recover {
+  match [MOVE($reg, $reg)] => [];
+  fold constants;
+
+  match [BR_EQ($left, $right, $yes, $no)]
+    where const($left) == const($right) => [JUMP($yes)],
+    where const($left) != const($right) => [JUMP($no)];
+
+  prune unreachable;
+  dce;
+}

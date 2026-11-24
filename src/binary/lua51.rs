@@ -3,6 +3,7 @@ use super::*;
 struct Function {
     image: Image,
     children: Vec<Function>,
+    vararg_flags: u8,
 }
 
 const OPS: &[&str] = &[
@@ -101,7 +102,7 @@ fn read_function(r: &mut Reader<'_>, size_t: u8, depth: usize) -> Result<Functio
     r.take(8)?;
     let upvalues = usize::from(r.byte()?);
     let params = r.byte()?;
-    r.byte()?;
+    let vararg_flags = r.byte()?;
     let stack = u16::from(r.byte()?);
     if stack == 0 || u16::from(params) > stack {
         return Err(r.error("invalid Lua register frame"));
@@ -143,10 +144,13 @@ fn read_function(r: &mut Reader<'_>, size_t: u8, depth: usize) -> Result<Functio
         image: Image {
             stack,
             upvalues,
+            params,
+            variadic: vararg_flags & 2 != 0,
             words,
             constants,
         },
         children,
+        vararg_flags,
     })
 }
 
@@ -154,14 +158,45 @@ fn lower_tree(program: &mut Vec<Proto>, function: &Function, name: String) -> Re
     let mut lowered = Vec::new();
     let mut pc = 0;
     while pc < function.image.words.len() {
-        let (width, instructions) =
+        let (width, mut instructions) =
             lower(function, &name, pc).map_err(|err| format!("Lua 5.1 {name} pc {pc}: {err}"))?;
+        if pc == 0 && function.vararg_flags & 4 != 0 {
+            // Lua 5.1's implicit arg table is specific to that ABI.
+            instructions.insert(0, inst(Op::Native, native_args("lua51", "LEGACY_ARG", &[])));
+        }
         lowered.push(Lowered { pc, instructions });
         pc += width;
     }
-    program.push(assemble(name.clone(), lowered)?);
-    for (child, function) in function.children.iter().enumerate() {
-        lower_tree(program, function, format!("{name}_{child}"))?;
+    let mut proto = assemble(name.clone(), &function.image, lowered)?;
+    let children: Vec<String> = (0..function.children.len())
+        .map(|id| format!("{name}_{id}"))
+        .collect();
+    let opaque = proto
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .filter(|inst| inst.op.native())
+        .map(ToString::to_string)
+        .collect();
+    proto.lua51 = Some(Lua51Origin {
+        stack: function.image.stack,
+        upvalues: function.image.upvalues as u8,
+        vararg_flags: function.vararg_flags,
+        constants: function
+            .image
+            .constants
+            .iter()
+            .map(|value| match value {
+                PoolValue::Literal(value) => value.clone(),
+                _ => unreachable!("Lua 5.1's constant pool is scalar"),
+            })
+            .collect(),
+        children: children.clone(),
+        opaque,
+    });
+    program.push(proto);
+    for (name, function) in children.into_iter().zip(&function.children) {
+        lower_tree(program, function, name)?;
     }
     Ok(())
 }
@@ -249,7 +284,7 @@ fn lower(function: &Function, proto: &str, pc: usize) -> Result<(usize, Vec<Inst
         }
         27 | 33 => code.push(branch(Op::NativeBranch, opaque(), pc + 1, pc + 2)),
         29 => code.push(inst(Op::NativeReturn, opaque())),
-        30 if b != 0 => code.push(image.return_fixed(a, b - 1)?),
+        30 if b != 0 => code.push(image.fixed_range(Op::Return, a, b - 1)?),
         30 => code.push(inst(Op::NativeReturn, opaque())),
         31 => code.push(branch(
             Op::NativeBranch,
@@ -288,6 +323,7 @@ fn lower(function: &Function, proto: &str, pc: usize) -> Result<(usize, Vec<Inst
             )));
             code.push(inst(Op::Native, args));
         }
+        37 if b != 0 => code.push(image.fixed_range(Op::Vararg, a, b - 1)?),
         _ => {
             let mut args = opaque();
             if matches!(opcode, 5 | 7) {

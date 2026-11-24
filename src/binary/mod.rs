@@ -4,6 +4,15 @@ mod luau;
 use crate::ir::{Block, Const, Inst, Op, Operand, Proto, Reg};
 use std::collections::BTreeSet;
 
+pub(crate) struct Lua51Origin {
+    pub stack: u16,
+    pub upvalues: u8,
+    pub vararg_flags: u8,
+    pub constants: Vec<Const>,
+    pub children: Vec<String>,
+    pub opaque: BTreeSet<String>,
+}
+
 pub fn import(bytes: &[u8]) -> Result<Vec<Proto>, String> {
     if bytes.starts_with(b"\x1bLua") {
         lua51::import(bytes)
@@ -124,6 +133,8 @@ enum PoolValue {
 struct Image {
     stack: u16,
     upvalues: usize,
+    params: u8,
+    variadic: bool,
     words: Vec<u32>,
     constants: Vec<PoolValue>,
 }
@@ -149,11 +160,11 @@ impl Image {
         })
     }
 
-    fn return_fixed(&self, start: u32, count: u32) -> Result<Inst, String> {
+    fn fixed_range(&self, op: Op, start: u32, count: u32) -> Result<Inst, String> {
         let args = (start..start + count)
             .map(|reg| self.reg(reg))
             .collect::<Result<_, _>>()?;
-        Ok(inst(Op::Return, args))
+        Ok(inst(op, args))
     }
 }
 
@@ -208,7 +219,7 @@ fn add_pool_value(args: &mut Vec<Operand>, image: &Image, index: u32) -> Result<
     Ok(())
 }
 
-fn assemble(name: String, lowered: Vec<Lowered>) -> Result<Proto, String> {
+fn assemble(name: String, image: &Image, lowered: Vec<Lowered>) -> Result<Proto, String> {
     let pcs: BTreeSet<_> = lowered.iter().map(|item| item.pc).collect();
     let mut leaders = BTreeSet::from([0]);
     for (i, item) in lowered.iter().enumerate() {
@@ -253,7 +264,13 @@ fn assemble(name: String, lowered: Vec<Lowered>) -> Result<Proto, String> {
         block.instructions.extend(item.instructions);
     }
     blocks.push(block);
-    let proto = Proto { name, blocks };
+    let proto = Proto {
+        name,
+        params: image.params,
+        variadic: image.variadic,
+        blocks,
+        lua51: None,
+    };
     proto
         .verify()
         .map_err(|err| format!("{}: {err}", proto.name))?;

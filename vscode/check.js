@@ -12,13 +12,15 @@ function parseDiagnostic(stderr, source) {
   return { line, start, end, message: match[3] };
 }
 
-function checkRules(executable, source, signal) {
+function checkRules(executable, source, signal, sourcePath) {
   const toolError = (message) => ({ line: 0, start: 0, end: 0, message, toolError: true });
   if (typeof executable !== 'string' || executable.includes('\0')) {
     return Promise.resolve(toolError('Set slatt.executablePath to a valid executable path.'));
   }
   return new Promise((resolve) => {
-    const child = execFile(executable, ['check', '-'], {
+    const args = ['check', '-'];
+    if (sourcePath) args.push('--stdin-path', sourcePath);
+    const child = execFile(executable, args, {
       windowsHide: true,
       encoding: 'utf8',
       timeout: 5000,
@@ -28,6 +30,8 @@ function checkRules(executable, source, signal) {
       if (!error || signal?.aborted) return resolve(undefined);
       const diagnostic = parseDiagnostic(stderr, source);
       if (diagnostic) return resolve(diagnostic);
+      const projectError = /^slatt: ([^\r\n]+)/m.exec(stderr);
+      if (projectError) return resolve({ line: 0, start: 0, end: 0, message: projectError[1] });
       const message = error.code === 'ENOENT'
         ? 'Slatt executable could not be found. Set slatt.executablePath to enable diagnostics.'
         : 'Slatt failed to check this file. Check slatt.executablePath and run slatt check in a terminal.';

@@ -1,0 +1,16 @@
+frontend
+fn parse_mix(input) {
+    let tokens = lua_token_list(input);
+    if tokens.len != 7 ||
+        tokens[0] != "return" || tokens[1] != "mix" || tokens[2] != "(" ||
+        tokens[4] != "," || tokens[6] != ")" {
+        throw "expected return mix(left, right)";
+    }
+    let left = parse_int(tokens[3]);
+    let right = parse_int(tokens[5]);
+    if left < 0 || left > 4294967295 || right < 0 || right > 4294967295 {
+        throw "operands must be 32-bit unsigned integers";
+    }
+    [left, right]
+}
+%%

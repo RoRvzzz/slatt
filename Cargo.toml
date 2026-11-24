@@ -3,4 +3,9 @@ name = "slatt"
 version = "0.2.0"
 edition = "2024"
 
+[dependencies]
+full_moon = "3.0.0"
+rhai = { version = "1.23", features = ["serde", "no_module"] }
+sha2 = "0.10"
+
 [workspace]

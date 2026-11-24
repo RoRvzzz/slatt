@@ -134,6 +134,7 @@ pub enum Op {
     BranchEq,
     BranchLt,
     BranchLe,
+    Vararg,
     Return,
     Native,
     NativeBranch,
@@ -155,6 +156,7 @@ impl Op {
             "BR_EQ" => Self::BranchEq,
             "BR_LT" => Self::BranchLt,
             "BR_LE" => Self::BranchLe,
+            "VARARG" => Self::Vararg,
             "RETURN" => Self::Return,
             "NATIVE" => Self::Native,
             "NATIVE_BRANCH" => Self::NativeBranch,
@@ -177,6 +179,7 @@ impl Op {
             Self::BranchEq => "BR_EQ",
             Self::BranchLt => "BR_LT",
             Self::BranchLe => "BR_LE",
+            Self::Vararg => "VARARG",
             Self::Return => "RETURN",
             Self::Native => "NATIVE",
             Self::NativeBranch => "NATIVE_BRANCH",
@@ -193,12 +196,16 @@ impl Op {
             Self::Jump => &[Block],
             Self::Branch => &[Reg, Block, Block],
             Self::BranchEq | Self::BranchLt | Self::BranchLe => &[Reg, Reg, Block, Block],
-            Self::Return | Self::Native | Self::NativeBranch | Self::NativeReturn => &[],
+            Self::Vararg
+            | Self::Return
+            | Self::Native
+            | Self::NativeBranch
+            | Self::NativeReturn => &[],
         }
     }
 
     pub fn types(self, count: usize) -> Result<Vec<Type>, String> {
-        if self == Self::Return {
+        if matches!(self, Self::Return | Self::Vararg) {
             return Ok(vec![Type::Reg; count]);
         }
         if self.native() {
@@ -238,7 +245,7 @@ impl Op {
         )
     }
 
-    fn native(self) -> bool {
+    pub(crate) fn native(self) -> bool {
         matches!(self, Self::Native | Self::NativeBranch | Self::NativeReturn)
     }
 }
@@ -265,7 +272,7 @@ impl Inst {
     }
 
     fn destination(&self) -> Option<Reg> {
-        if self.op.terminates() || self.op.native() {
+        if self.op.terminates() || self.op.native() || self.op == Op::Vararg {
             return None;
         }
         let Operand::Reg(reg) = self.args[0] else {
@@ -274,7 +281,7 @@ impl Inst {
         Some(reg)
     }
 
-    fn result(&self, facts: &Facts) -> Option<Const> {
+    pub(crate) fn result(&self, facts: &Facts) -> Option<Const> {
         match self.op {
             Op::LoadK | Op::Move => value_of(&self.args[1], facts).cloned(),
             Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Xor32 => {
@@ -299,6 +306,12 @@ impl Inst {
     }
 
     fn transfer(&self, facts: &mut Facts) {
+        if self.op == Op::Vararg {
+            for reg in self.args.iter().filter_map(operand_register) {
+                facts.remove(&reg);
+            }
+            return;
+        }
         if self.op.native() || (self.comparison().is_some() && self.condition(facts).is_none()) {
             facts.clear();
             return;
@@ -376,7 +389,10 @@ pub struct Block {
 
 pub struct Proto {
     pub name: String,
+    pub params: u8,
+    pub variadic: bool,
     pub blocks: Vec<Block>,
+    pub(crate) lua51: Option<crate::binary::Lua51Origin>,
 }
 
 pub type Facts = BTreeMap<Reg, Const>;
@@ -408,6 +424,12 @@ impl Proto {
             if !last.op.terminates() || before.iter().any(|inst| inst.op.terminates()) {
                 return Err(format!(
                     "@{} needs exactly one terminator at the end",
+                    block.name
+                ));
+            }
+            if !self.variadic && before.iter().any(|inst| inst.op == Op::Vararg) {
+                return Err(format!(
+                    "@{} uses VARARG in a non-variadic prototype",
                     block.name
                 ));
             }
@@ -518,6 +540,46 @@ impl Proto {
         Ok(())
     }
 
+    pub fn thread_jumps(&mut self) -> Result<(), String> {
+        self.verify()?;
+        let redirects: BTreeMap<_, _> = self
+            .blocks
+            .iter()
+            .filter_map(|block| {
+                let [jump] = block.instructions.as_slice() else {
+                    return None;
+                };
+                (jump.op == Op::Jump).then(|| (block.name.clone(), jump.args[0].block().to_owned()))
+            })
+            .collect();
+        for tail in self
+            .blocks
+            .iter_mut()
+            .filter_map(|block| block.instructions.last_mut())
+        {
+            if tail.op.native() {
+                continue;
+            }
+            for argument in &mut tail.args {
+                let Operand::Block(target) = argument else {
+                    continue;
+                };
+                let mut cursor = target.as_str();
+                let mut visited = BTreeSet::new();
+                while let Some(next) = redirects.get(cursor) {
+                    if !visited.insert(cursor) {
+                        break;
+                    }
+                    cursor = next;
+                }
+                if !redirects.contains_key(cursor) && cursor != target {
+                    *target = cursor.to_owned();
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn dce(&mut self) -> Result<(), String> {
         self.verify()?;
         // a native closure can make later writes visible through an escaped register cell.
@@ -566,7 +628,11 @@ impl Proto {
                         if let Some(dst) = dst {
                             live.remove(&dst);
                         }
-                        if inst.op.native() {
+                        if inst.op == Op::Vararg {
+                            for reg in inst.args.iter().filter_map(operand_register) {
+                                live.remove(&reg);
+                            }
+                        } else if inst.op.native() {
                             live.extend(&registers);
                         } else {
                             live.extend(
@@ -605,7 +671,7 @@ fn operand_register(operand: &Operand) -> Option<Reg> {
 }
 
 // distinguish signed zeros at joins because subsequent division can observe the sign.
-fn same_fact(left: &Const, right: &Const) -> bool {
+pub(crate) fn same_fact(left: &Const, right: &Const) -> bool {
     match (left, right) {
         (Const::Number(left), Const::Number(right)) => left.to_bits() == right.to_bits(),
         _ => left == right,
@@ -614,7 +680,14 @@ fn same_fact(left: &Const, right: &Const) -> bool {
 
 impl Display for Proto {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        writeln!(f, "proto {} {{", self.name)?;
+        write!(f, "proto {}", self.name)?;
+        if self.params != 0 {
+            write!(f, " params {}", self.params)?;
+        }
+        if self.variadic {
+            f.write_str(" vararg")?;
+        }
+        writeln!(f, " {{")?;
         for block in &self.blocks {
             writeln!(f, "  @{}:", block.name)?;
             for inst in &block.instructions {

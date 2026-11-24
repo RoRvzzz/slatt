@@ -1,0 +1,239 @@
+frontend
+// shortcut: one verified V3 dispatcher and instruction layout; add handler profiles
+// as other layouts are independently classified and replayed.
+let tokens = lua_tokens(source);
+let candidates = tokens.split("local function j ( b , ... ) local u = f ( e , ");
+if candidates.len != 2 { throw "MoonSec byte stream not found"; }
+let payload = candidates[1].split("\"")[1];
+if !lua_strings(source).contains(payload) { throw "MoonSec byte stream is not a literal"; }
+
+let encoded = bytes(payload);
+if (encoded.len - 16) % 2 != 0 { throw "invalid MoonSec payload size"; }
+let alphabet = #{};
+for i in 0..16 {
+    let symbol = encoded[i].to_string();
+    if alphabet.contains(symbol) { throw "duplicate MoonSec alphabet symbol"; }
+    alphabet[symbol] = i;
+}
+let encoded_body = [];
+for i in 0..((encoded.len - 16) / 2) {
+    let high = alphabet[encoded[16 + 2 * i].to_string()] ?? 0;
+    let low = alphabet[encoded[17 + 2 * i].to_string()] ?? 0;
+    encoded_body.push(high * 16 + low);
+}
+let decoded = blob();
+for seed in 0..256 {
+    if (encoded_body[1] + 2 * seed) % 256 != 0 ||
+       (encoded_body[2] + 3 * seed) % 256 != 0 ||
+       (encoded_body[3] + 4 * seed) % 256 != 0 { continue; }
+    if decoded.len != 0 { throw "ambiguous MoonSec seed"; }
+    for i in 0..encoded_body.len {
+        decoded.push((encoded_body[i] + seed * (i + 1)) % 256);
+    }
+}
+if decoded.len == 0 { throw "MoonSec seed not recovered"; }
+
+fn read(data, cursor, width) {
+    if cursor[0] + width > data.len { throw "truncated MoonSec payload"; }
+    let value = 0;
+    for i in 0..width { value += data[cursor[0] + i] << (8 * i); }
+    cursor[0] += width;
+    // Pass the cursor back explicitly because Rhai arguments are values.
+    [value, cursor[0]]
+}
+
+let at = [0];
+let pair = read(decoded, at, 4); at[0] = pair[1];
+if pair[0] < 1 || pair[0] > 255 { throw "unsupported MoonSec constant pool"; }
+let constants = [];
+for i in 0..pair[0] {
+    pair = read(decoded, at, 1); at[0] = pair[1];
+    if pair[0] != 0 { throw "unsupported MoonSec constant tag"; }
+    pair = read(decoded, at, 4); at[0] = pair[1];
+    let value = blob();
+    for j in 0..pair[0] {
+        let byte = read(decoded, at, 1); at[0] = byte[1];
+        value.push(byte[0]);
+    }
+    constants.push(value);
+}
+pair = read(decoded, at, 1); at[0] = pair[1];
+if pair[0] != 0 { throw "unsupported MoonSec parameter count"; }
+pair = read(decoded, at, 4); at[0] = pair[1];
+let instructions = [];
+let size = pair[0];
+if size == 0 || size > 4096 { throw "invalid MoonSec instruction count"; }
+for pc in 0..size {
+    pair = read(decoded, at, 1); at[0] = pair[1];
+    let descriptor = pair[0];
+    let kind = (descriptor >> 1) & 3;
+    if (descriptor & 1) != 0 || descriptor >= 64 { throw "unsupported MoonSec descriptor"; }
+    pair = read(decoded, at, 2); at[0] = pair[1]; let op = pair[0];
+    pair = read(decoded, at, 2); at[0] = pair[1]; let a = pair[0];
+    pair = read(decoded, at, if kind == 0 { 2 } else { 4 }); at[0] = pair[1];
+    let b = pair[0] - if kind >= 2 { 65536 } else { 0 };
+    let c = 0;
+    if kind == 0 || kind == 3 { pair = read(decoded, at, 2); at[0] = pair[1]; c = pair[0]; }
+    instructions.push([op,a,b,c,descriptor >> 3]);
+}
+pair = read(decoded, at, 4); at[0] = pair[1];
+if pair[0] != 0 || at[0] != decoded.len { throw "unsupported MoonSec child prototypes or trailing data"; }
+
+fn quote_lua(data) {
+    let output = "\"";
+    for i in 0..data.len {
+        let byte = data[i];
+        if byte == 10 { output += "\\n"; }
+        else if byte == 13 { output += "\\r"; }
+        else if byte == 9 { output += "\\t"; }
+        else if byte == 34 || byte == 92 { output += "\\" + byte_char(byte); }
+        else if byte >= 32 && byte <= 126 { output += byte_char(byte); }
+        else { output += "\\" + (byte/100).to_string() + (byte/10%10).to_string() + (byte%10).to_string(); }
+    }
+    output + "\""
+}
+
+if source_output {
+    let wrapper = tokens.split("\"" + payload + "\"");
+    if wrapper.len != 2 ||
+       sha256(wrapper[0] + wrapper[1]) != "24cd52d0bb9b613a0f0781a5322397ab05c5b20906abc98ba7b1878b638ede11" {
+        throw "unsupported MoonSec Lua source wrapper";
+    }
+    if instructions.len != 11 || constants.len != 5 {
+        throw "unsupported MoonSec Lua source graph";
+    }
+    let flag = instructions[0][2];
+    // The fused comparison has two jump chains ending in a call or a bare return.
+    let graph = [[13,0,flag,0,0], [9,0,2,0,2], [25,0,1,0,2], [11,0,6,3,4],
+                 [17,0,6,0,0], [17,0,7,0,0], [3,0,1,0,0], [5,0,5,0,2],
+                 [11,1,4,0,2], [19,0,2,1,0], [7,0,1,0,0]];
+    if instructions != graph || quote_lua(constants[0]) != "\"_CqBYrTvBZQgS\"" ||
+       quote_lua(constants[1]) != "\"MoonSec_StringsHiddenAttr\"" ||
+       quote_lua(constants[4]) != "\"print\"" {
+        throw "unsupported MoonSec Lua source operands";
+    }
+    return "(\"This file was protected with MoonSec V3\"):gsub(\".+\", function(value)\n" +
+           "    _CqBYrTvBZQgS = value\nend)\n\n" +
+           "-- The bootstrap reads print before entering the payload.\nlocal _ = print\n" +
+           "MoonSec_StringsHiddenAttr = " + (flag != 0).to_string() + "\n" +
+           "if _CqBYrTvBZQgS == " + quote_lua(constants[2]) + " then\n" +
+           "    print(" + quote_lua(constants[3]) + ")\nend\n";
+}
+
+fn abc(op, a, b, c) {
+    if a < 0 || a > 249 || b < 0 || b > 511 || c < 0 || c > 511 { throw "invalid Lua operands"; }
+    op | (a << 6) | (c << 14) | (b << 23)
+}
+fn abx(op, a, bx) { abc(op, a, bx >> 9, bx & 511) }
+fn constant(pool, index) {
+    if index < 1 || index > pool.len { throw "invalid MoonSec constant index"; }
+    index - 1
+}
+fn little(out, value, size) {
+    for i in 0..size { out.push(if i < 8 { (value >> (8 * i)) & 255 } else { 0 }); }
+    out
+}
+fn prototype(out, params, vararg, frame, words, constants, children) {
+    out = little(out, 0, 16);
+    out.push(0); out.push(params); out.push(vararg); out.push(frame);
+    out = little(out, words.len, 4);
+    for word in words { out = little(out, word, 4); }
+    out = little(out, constants.len, 4);
+    for value in constants {
+        out.push(4);
+        out = little(out, value.len + 1, 8);
+        for i in 0..value.len { out.push(value[i]); }
+        out.push(0);
+    }
+    out = little(out, children, 4);
+    out
+}
+
+let banner = bytes("This file was protected with MoonSec V3");
+let prelude = `( [[This file was protected with MoonSec V3]] ) : gsub ( '.+' , ( function ( a ) _CqBYrTvBZQgS = a ; end ) ) ; return`;
+if !tokens.starts_with(prelude) { throw "unsupported MoonSec bootstrap"; }
+if !tokens.contains("l [ e [ o ] ] = ( e [ d ] ~= 0 ) ; n = n + 1 ; e = f [ n ]") ||
+   !tokens.contains("if ( l [ e [ o ] ] == e [ r ] ) then n = n + 1 ; else n = e [ d ] ; end") ||
+   !tokens.contains("h = e [ o ] l [ h ] ( l [ h + 1 ] ) n = n + 1 ; e = f [ n ] ; do return end") {
+    throw "unsupported MoonSec dispatcher templates";
+}
+if !tokens.contains("e = f [ n ] ; t = e [ ee ] ; if 8 < t then if 13 > t") ||
+   !tokens.contains("if t >= 16 then if t >= 12 then for f = 19 , 54 do if t ~= 17") ||
+   !tokens.contains("else n = e [ d ] ; end end else if 4 ~= t then l [ e [ o ] ] = a [ e [ d ] ]") {
+    throw "unknown MoonSec opcode assignments";
+}
+// Preserve the Lua wrapper's banner callback and observable global write.
+let banner_index = constants.len;
+let gsub_index = banner_index + 1;
+let pattern_index = banner_index + 2;
+let words = [abx(1,0,banner_index), abc(11,0,0,256 + gsub_index), abx(1,2,pattern_index),
+             abx(36,3,0), abc(28,0,4,1), abc(3,0,3,0)];
+let labels = #{};
+let jumps = [];
+let pc = 0;
+let frame = 4;
+while pc < instructions.len {
+    labels[(pc + 1).to_string()] = words.len;
+    let row = instructions[pc];
+    let op = row[0];
+    if op == 13 {
+        if pc + 3 >= instructions.len { throw "truncated MoonSec comparison superinstruction"; }
+        let store = instructions[pc + 1];
+        let load = instructions[pc + 2];
+        let branch = instructions[pc + 3];
+        if row[4] != 0 || store[0] != 9 || store[4] != 2 || load[0] != 25 || load[4] != 2 || branch[0] != 11 || branch[4] != 4 {
+            throw "unsupported MoonSec comparison operands";
+        }
+        words.push(abc(2,row[1],if row[2] == 0 { 0 } else { 1 },0));
+        words.push(abx(7,store[1],constant(constants,store[2])));
+        words.push(abx(5,load[1],constant(constants,load[2])));
+        let comparison_pc = pc + 4;
+        frame = max(frame, max(max(row[1], store[1]), max(load[1], branch[1])) + 1);
+        words.push(abc(23,0,branch[1],256 + constant(constants,branch[3])));
+        jumps.push([words.len, branch[2] + 1]); words.push(0);
+        jumps.push([words.len, comparison_pc + 2]); words.push(0);
+        pc += 4;
+    } else if op == 17 && row[4] == 0 {
+        jumps.push([words.len, row[2] + 1]); words.push(0);
+        pc += 1;
+    } else if op == 3 && row[4] == 0 {
+        words.push(abc(30,0,1,0));
+        pc += 1;
+    } else if op == 5 && row[4] == 2 {
+        words.push(abx(5,row[1],constant(constants,row[2])));
+        frame = max(frame, row[1] + 1);
+        pc += 1;
+    } else if op == 11 && row[4] == 2 {
+        if pc + 2 >= instructions.len { throw "truncated MoonSec call superinstruction"; }
+        let invoke = instructions[pc + 1];
+        let ret = instructions[pc + 2];
+        if invoke[0] != 19 || invoke[4] != 0 || ret[0] != 7 || ret[4] != 0 { throw "unsupported MoonSec call operands"; }
+        words.push(abx(1,row[1],constant(constants,row[2])));
+        words.push(abc(28,invoke[1],2,1));
+        words.push(abc(30,0,1,0));
+        frame = max(frame, max(row[1] + 1, invoke[1] + 2));
+        pc += 3;
+    } else {
+        throw "unclassified MoonSec opcode " + op.to_string();
+    }
+}
+for jump in jumps {
+    let target = labels[jump[1].to_string()];
+    if target == () { throw "MoonSec jump targets a continuation or invalid PC"; }
+    words[jump[0]] = abx(22,0,131071 + target - jump[0] - 1);
+}
+let chunk = blob();
+for byte in [27,76,117,97,81,0,1,4,8,4,8,0] { chunk.push(byte); }
+constants.push(banner);
+constants.push(bytes("gsub"));
+constants.push(bytes(".+"));
+chunk = prototype(chunk,0,2,frame,words,constants,1);
+chunk = prototype(chunk,1,0,2,[abx(7,0,0),abc(30,0,1,0)],[bytes("_CqBYrTvBZQgS")],0);
+chunk = little(chunk,0,24);
+chunk
+%%
+pass recover {
+  thread jumps;
+  prune unreachable;
+  dce;
+}

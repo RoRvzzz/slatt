@@ -1,0 +1,691 @@
+frontend
+// shortcut: audited VoltFuscator loader graphs and packet layouts.
+fn mod31(value) { ((value % 2147483647)+2147483647)%2147483647 }
+
+fn checksum(data) {
+    let value = 5381;
+    for i in 0..data.len { value = mod31(value*33+data[i]); }
+    value
+}
+
+fn ascii85(input, offset, size) {
+    let width = ((size+3)/4)*5;
+    if offset < 1 || size < 1 || offset-1+width > input.len {
+        throw "invalid VoltFuscator Base85 span";
+    }
+    let output = blob();
+    for at in range(offset-1,offset-1+width,5) {
+        let word = 0;
+        for i in 0..5 {
+            let digit = input[at+i]-33;
+            if digit < 0 || digit > 84 { throw "invalid VoltFuscator Base85 digit"; }
+            word = word*85+digit;
+        }
+        if word > 0xffffffff { throw "VoltFuscator Base85 word overflow"; }
+        for i in 0..4 {
+            if output.len < size { output.push((word >> (24-i*8)) & 255); }
+        }
+    }
+    output
+}
+
+fn bootstrap_text(source, offset, size, key) {
+    let data = ascii85(source,offset,size);
+    for i in 0..data.len { data[i] = (data[i]-key-i%251) & 255; }
+    data
+}
+
+fn zigzag(value) {
+    if value%2 == 0 { value/2 } else { -(value+1)/2 }
+}
+
+fn permutation_group(data, bias, factor) {
+    let values = [];
+    let value = 0;
+    let scale = 1;
+    for i in 0..data.len {
+        let digit = ((data[i]-bias)*factor%84+84)%84;
+        if digit >= 42 {
+            value += (digit-42)*scale;
+            scale *= 42;
+            if scale > 1764 { throw "oversized VoltFuscator permutation byte"; }
+        } else {
+            let decoded = zigzag(value+digit*scale);
+            if decoded < 0 || decoded > 255 { throw "invalid VoltFuscator permutation byte"; }
+            values.push(decoded);
+            value = 0;
+            scale = 1;
+        }
+    }
+    if scale != 1 || values.len != 64 { throw "invalid VoltFuscator permutation group"; }
+    values
+}
+
+fn segment(source, offset, size, length, seed, salt, expected) {
+    if size > 65536 || length < 1 || length > 65536 || seed < 1 || seed >= 2147483647 {
+        throw "invalid VoltFuscator segment bounds";
+    }
+    let compressed = ascii85(source,offset,size);
+    for i in 0..compressed.len {
+        let cipher = compressed[i];
+        compressed[i] = (cipher-seed%256) & 255;
+        seed = mod31(seed*48271+cipher+salt+(i+1)%251);
+    }
+    if checksum(compressed) != expected { throw "VoltFuscator segment checksum mismatch"; }
+    let output = blob();
+    let at = 0;
+    while at < compressed.len {
+        let control = compressed[at]; at += 1;
+        for i in 0..8 {
+            if at >= compressed.len { break; }
+            if ((control >> i) & 1) == 0 {
+                if output.len >= length { throw "VoltFuscator literal exceeds segment size"; }
+                output.push(compressed[at]); at += 1;
+            } else {
+                if at+3 > compressed.len { throw "truncated VoltFuscator back reference"; }
+                let distance = compressed[at]+compressed[at+1]*256;
+                let count = compressed[at+2]+3;
+                at += 3;
+                if distance < 1 || distance > output.len || output.len+count > length {
+                    throw "invalid VoltFuscator back reference";
+                }
+                for j in 0..count { output.push(output[output.len-distance]); }
+            }
+        }
+    }
+    if output.len != length { throw "VoltFuscator segment size mismatch"; }
+    output
+}
+
+fn take() {
+    if this.at >= this.bytes.len { throw "truncated VoltFuscator packet"; }
+    let byte = this.bytes[this.at];
+    this.at += 1;
+    byte
+}
+
+fn integer() {
+    let value = 0;
+    for i in 0..8 {
+        let byte = this.take();
+        value |= (byte & 127) << (i*7);
+        if byte < 128 {
+            if value >= (1 << 53) { throw "VoltFuscator integer exceeds exact range"; }
+            return value;
+        }
+    }
+    throw "invalid VoltFuscator variable integer";
+}
+
+fn packet_bytes() {
+    let length = this.integer();
+    if length > this.bytes.len-this.at { throw "truncated VoltFuscator packet field"; }
+    let output = blob();
+    for i in 0..length { output.push(this.take()); }
+    output
+}
+
+fn string_table() {
+    let size = this.integer();
+    if size > 4096 { throw "VoltFuscator string table exceeds limit"; }
+    let values = [];
+    for i in 0..size { values.push(this.packet_bytes()); }
+    values
+}
+
+fn code_section() {
+    let length = this.integer();
+    let width = this.integer();
+    if length < 4 || length > 16384 || length%4 != 0 || width < 1 || width > 2 {
+        throw "unsupported VoltFuscator instruction section";
+    }
+    let pool = [];
+    let regular = this.integer();
+    if regular > 4096 { throw "VoltFuscator operand pool exceeds limit"; }
+    for i in 0..regular { pool.push(zigzag(this.integer())); }
+    let encoded = this.integer();
+    if regular+encoded < 1 || regular+encoded > 4096 { throw "invalid VoltFuscator operand pool size"; }
+    for i in 0..encoded { pool.push(this.integer()); }
+    let blocks = #{};
+    let count = this.integer();
+    if count < 1 || count > length/4 { throw "invalid VoltFuscator block count"; }
+    for i in 0..count {
+        let pc = this.integer();
+        let key = pc.to_string();
+        let code = this.packet_bytes();
+        let rows = this.integer();
+        let edges = this.integer();
+        if pc < 1 || (pc-1)%4 != 0 || rows < 1 || pc-1+rows*4 > length ||
+           edges > 2 || blocks[key] != () || code.len != rows*(1+3*width)+4*edges {
+            throw "invalid VoltFuscator block descriptor";
+        }
+        blocks[key] = [code,rows,edges];
+    }
+    #{length:length,width:width,regular:regular,pool:pool,blocks:blocks}
+}
+
+fn prototype(data) {
+    let reader = #{bytes:data,at:0};
+    let sections = #{};
+    for i in 0..4 {
+        let kind = reader.integer().to_string();
+        if sections[kind] != () { throw "duplicate VoltFuscator prototype section"; }
+        if kind == "1" || kind == "3" { sections[kind] = reader.string_table(); }
+        else if kind == "2" { sections[kind] = reader.code_section(); }
+        else if kind == "5" {
+            sections[kind] = [reader.integer(),reader.integer(),reader.integer(),reader.integer()];
+        } else { throw "unknown VoltFuscator prototype section"; }
+    }
+    if reader.at != data.len { throw "trailing VoltFuscator prototype data"; }
+    sections
+}
+
+fn encrypted_integer(width) {
+    let value = 0;
+    for i in 0..width {
+        this.state = mod31(this.state*48271);
+        let byte = (this.take()-this.state%256) & 255;
+        value |= byte << (i*8);
+    }
+    value
+}
+
+fn decode_block(section, pc, seed, layout) {
+    let block = section.blocks[pc.to_string()];
+    if block == () { throw "missing VoltFuscator transition block"; }
+    let start = mod31(seed+pc*[257,269,939][layout]);
+    let state = mod31(start*48271);
+    let guard = (state & 0x1fffff)*(1 << 31)+mod31(state*48271);
+    let reader = #{bytes:block[0],at:0,state:start};
+    let scale = if layout == 2 {4096} else {512};
+    let words = [];
+    for i in 0..block[1] {
+        words.push(reader.encrypted_integer(1));
+        let operands = [];
+        for j in 0..3 {
+            let index = reader.encrypted_integer(section.width)%section.pool.len;
+            if index < section.regular { operands.push(section.pool[index]); }
+            else { operands.push((index+1)*scale+(section.pool[index]%2)*256); }
+        }
+        words += if layout == 1 {[operands[0],operands[2],operands[1]]} else {operands};
+    }
+    let edges = [];
+    for i in 0..block[2] { edges.push(mod31(reader.encrypted_integer(4))); }
+    if reader.at != block[0].len { throw "trailing VoltFuscator instruction bytes"; }
+    [words,edges,guard]
+}
+
+fn decode_string(constants, section, permutation, guard, salt, op_salt, ref) {
+    if ref < 512 || ref%512 != 0 || ref/512 <= section.regular || ref/512 > section.pool.len {
+        throw "invalid VoltFuscator constant reference";
+    }
+    let ticket = section.pool[ref/512-1];
+    let packed = ((ticket/2-guard) & ((1 << 52)-1))-(ticket%2)*256;
+    let index = (((packed & 0xfffff)-(op_salt & 0xfffff)-salt*257) & 0xfffff)%constants.len;
+    let key = mod31((packed >> 20)-1-op_salt-salt*65537-index*131);
+    let data = decrypt(constants[index],key);
+    if data.len < 9 { throw "truncated VoltFuscator constant"; }
+    if data[0]%9 != 3 { throw "unexpected VoltFuscator constant type"; }
+    let length = little(data,1,4)%(data.len-4);
+    let output = blob();
+    let mix = (index+salt) & 255;
+    for i in 0..length {
+        let b = data[i+5] ^ (((i%251)*107+6+mix)%251);
+        let offset = if i%2 == 0 { 201+(i/2)*170 } else { 217+(i/2)*119 };
+        output.push(b ^ ((offset+mix) & 255));
+    }
+    for i in 1..length { output[i] ^= (output[i-1]*49+149+mix) & 255; }
+    for i in 0..length {
+        let entry = (output[i]-132-mix-i*80) & 255;
+        output[i] = permutation[entry] ^ ((mix+i) & 255);
+    }
+    output
+}
+
+fn quote(data) {
+    let output = "\"";
+    for i in 0..data.len {
+        let byte = data[i];
+        if byte == 34 || byte == 92 { output += "\\"+byte_char(byte); }
+        else if byte >= 32 && byte <= 126 { output += byte_char(byte); }
+        else { output += "\\"+(byte/100).to_string()+(byte/10%10).to_string()+(byte%10).to_string(); }
+    }
+    output+"\""
+}
+
+fn loader_environment(version, watermark, load_first) {
+    let load_alias = "if not environment.loadstring then environment.loadstring = environment.load end\n";
+    let unpack_alias = "if not environment.unpack then\n"+
+                       "    local library = environment.table\n"+
+                       "    if library then environment.unpack = library.unpack end\n"+
+                       "end\n";
+    let aliases = if load_first {load_alias+unpack_alias} else {unpack_alias+load_alias};
+    "local function resolve_environment()\n"+
+    "    local resolve = getfenv\n"+
+    "    if type(resolve) == \"function\" then\n"+
+    "        local ok, environment = pcall(function() return resolve() end)\n"+
+    "        if ok and type(environment) == \"table\" then return environment end\n"+
+    "    end\n"+
+    "    if type(_ENV) == \"table\" then return _ENV end\n"+
+    "    if type(_G) == \"table\" then return _G end\n"+
+    "    error(\"Voltfuscator: host environment is unavailable\", 0)\n"+
+    "end\n\n"+
+    "(\"This file was protected using Voltfuscator "+version+"\"):gsub(\".+\", function(watermark)\n"+
+    "    resolve_environment()."+watermark+" = watermark\n"+
+    "end)\n\n"+
+    "local environment = resolve_environment()\n"+
+    aliases+"environment."+watermark+" = nil\n\n"
+}
+
+fn little(data, at, width) {
+    if at+width > data.len { throw "truncated VoltFuscator number"; }
+    let value = 0;
+    for i in 0..width { value |= data[at+i] << (i*8); }
+    value
+}
+
+fn escaped_literal(token) {
+    if !token.starts_with("\"") || !token.ends_with("\"") { throw "invalid VoltFuscator literal"; }
+    let raw = bytes(token);
+    let result = blob();
+    let at = 1;
+    while at < raw.len-1 {
+        let byte = raw[at]; at += 1;
+        if byte == 92 {
+            byte = raw[at]; at += 1;
+            if byte != 34 && byte != 92 { throw "unsupported VoltFuscator table escape"; }
+        }
+        result.push(byte);
+    }
+    result
+}
+
+fn keyed_literals(text) {
+    let tokens = lua_token_list("return {"+text+"}");
+    let result = #{};
+    let at = 2;
+    while tokens[at] != "}" {
+        if tokens[at] != "[" || tokens[at+2] != "]" || tokens[at+3] != "=" {
+            throw "unsupported VoltFuscator keyed literal table";
+        }
+        let n = tokens[at+1];
+        let key = if n.starts_with("0x") {parse_int(n.sub_string(2),16)} else {parse_int(n)};
+        if result[key.to_string()] != () { throw "duplicate VoltFuscator bootstrap key"; }
+        result[key.to_string()] = tokens[at+4];
+        at += 5;
+        if tokens[at] == "," || tokens[at] == ";" { at += 1; }
+        else if tokens[at] != "}" { throw "invalid VoltFuscator literal table separator"; }
+    }
+    if at+1 != tokens.len { throw "trailing VoltFuscator literal table tokens"; }
+    result
+}
+
+fn keyed_bootstrap(literals, key) {
+    let encoded = escaped_literal(literals[key.to_string()]);
+    if encoded.len%5 != 0 { throw "invalid VoltFuscator bootstrap width"; }
+    let data = ascii85(encoded,1,encoded.len/5*4);
+    let state = (key+0xf830)%65521;
+    for i in 0..data.len {
+        let cipher = data[i];
+        state = (state*204+0xff0+i)%65521;
+        data[i] = (cipher-state%256) & 255;
+        state = (state+cipher)%65521;
+    }
+    let size = little(data,0,4);
+    if size > data.len-4 { throw "invalid VoltFuscator bootstrap value size"; }
+    let output = blob();
+    for i in 0..size { output.push(data[i+4]); }
+    output
+}
+
+fn read_header(data, count) {
+    let reader = #{bytes:data,at:0};
+    let result = [];
+    for i in 0..count { result.push(reader.integer()); }
+    if reader.at != data.len { throw "trailing VoltFuscator entry metadata"; }
+    result
+}
+
+fn loader_graph(image, header, paths) {
+    let section = image["2"];
+    let salt = image["5"][3];
+    let blocks = #{};
+    let successors = #{};
+    for path in paths {
+        let seed = header[7];
+        for i in 0..path.len {
+            let pc = path[i];
+            let block = decode_block(section,pc,seed,header[8]);
+            let mac = mod31(seed*131+pc*257+salt*65537);
+            let stamp = mac*(1 << 20)+(mod31(seed+pc*17+salt*257) & 0xfffff);
+            block.push(stamp);
+            let key = pc.to_string();
+            if blocks[key] != () && blocks[key] != block {
+                throw "inconsistent VoltFuscator block entry state";
+            }
+            blocks[key] = block;
+            let edges = block[1];
+            if i+1 == path.len {
+                if edges.len != 0 { throw "unaccounted VoltFuscator terminal edge"; }
+            } else {
+                let target = path[i+1];
+                let edge = if edges.len == 2 && target != pc+block[0].len {1} else {0};
+                if edge >= edges.len { throw "missing VoltFuscator control-flow edge"; }
+                let targets = successors[key] ?? #{};
+                let ordinal = edge.to_string();
+                if targets[ordinal] != () && targets[ordinal] != target {
+                    throw "ambiguous VoltFuscator control-flow edge";
+                }
+                targets[ordinal] = target;
+                successors[key] = targets;
+                seed = mod31(edges[edge]-mac-target*17);
+            }
+        }
+    }
+    for key in blocks.keys() {
+        let targets = successors[key] ?? #{};
+        if targets.keys().len != blocks[key][1].len { throw "unvisited VoltFuscator control-flow edge"; }
+    }
+    blocks
+}
+
+fn verify_graph(section, graph, dead, expected) {
+    let shape = "";
+    let next = 1;
+    let visited = 0;
+    for pc in range(1,section.length+1,4) {
+        let key = pc.to_string();
+        let descriptor = section.blocks[key];
+        if descriptor == () { continue; }
+        if pc != next { throw "overlapping or missing VoltFuscator block words"; }
+        next = pc+descriptor[1]*4;
+        let block = graph[key];
+        if block == () {
+            if !dead.contains(pc) || descriptor[1] != 1 { throw "unaccounted VoltFuscator block"; }
+        } else {
+            visited += 1;
+            shape += pc.to_string()+","+block[1].len.to_string();
+            for word in block[0] { shape += ","+word.to_string(); }
+            shape += ";";
+        }
+    }
+    if next != section.length+1 || visited != graph.keys().len ||
+       section.blocks.keys().len != visited+dead.len || sha256(shape) != expected {
+        throw "unsupported VoltFuscator instruction graph";
+    }
+}
+
+fn ticket77(image, block, ref, scale, child) {
+    let section = image["2"];
+    let slot = ref/scale;
+    if ref%scale != 0 || slot <= section.regular || slot > section.pool.len {
+        throw "invalid VoltFuscator 7.7 constant reference";
+    }
+    let ticket = section.pool[slot-1];
+    let stamp = block[3];
+    let salt = image["5"][3];
+    let packed = ((ticket/2-block[2]) & ((1 << 52)-1))-(ticket%2)*256;
+    let index = ((packed & 0xfffff)-(stamp & 0xfffff)-salt*257) & 0xfffff;
+    if !child {
+        if image["1"].len == 0 { throw "missing VoltFuscator 7.7 constants"; }
+        index %= image["1"].len;
+    }
+    let mix = mod31((packed >> 20)-1-stamp-salt*65537-index*131-
+                    (if child {257} else {0})+1950208240);
+    let key = ((mix & 0xfffff) << 11)+(mix >> 20);
+    [index,key]
+}
+
+fn decrypt(data, key) {
+    for i in 0..data.len {
+        key = mod31(key*48271);
+        data[i] = (data[i]-key%256) & 255;
+    }
+    data
+}
+
+fn integer_double(data) {
+    let low = little(data,1,4);
+    let high = little(data,5,4);
+    let exponent = ((high >> 20) & 0x7ff)-1023;
+    if high >= (1 << 31) || exponent < 0 || exponent > 52 {
+        throw "unsupported VoltFuscator GameId number";
+    }
+    let significand = (1 << 52)+((high & 0xfffff) << 32)+low;
+    let shift = 52-exponent;
+    if (significand & ((1 << shift)-1)) != 0 { throw "fractional VoltFuscator GameId"; }
+    significand >> shift
+}
+
+fn constant77(image, block, permutation, ref, scale) {
+    let ticket = ticket77(image,block,ref,scale,false);
+    let index = ticket[0];
+    let data = decrypt(image["1"][index],ticket[1]);
+    if data.len < 9 { throw "truncated VoltFuscator 7.7 constant"; }
+    let tag = data[0]%9;
+    if tag == 8 { return integer_double(data); }
+    if tag != 3 { throw "unsupported VoltFuscator 7.7 constant kind"; }
+    let size = little(data,1,4)%(data.len-4);
+    let output = blob();
+    let mix = (index+image["5"][3]) & 255;
+    for i in 0..size {
+        let byte = data[i+5] ^ (((i%251)*59+5+mix)%251);
+        let offset = if i%2 == 0 {70+(i/2)*78} else {245+(i/2)*173};
+        output.push(byte ^ ((offset+mix) & 255));
+    }
+    for i in 1..size { output[i] ^= (output[i-1]*101+201+mix) & 255; }
+    for i in 0..size {
+        let entry = (output[i]-82-mix-i*86) & 255;
+        output[i] = permutation[entry] ^ ((mix+i) & 255);
+    }
+    output
+}
+
+fn child_header77(image, block, ref) {
+    let selected = ticket77(image,block,ref,4096,true);
+    if selected[0] >= image["3"].len { throw "invalid VoltFuscator child reference"; }
+    let data = decrypt(image["3"][selected[0]],selected[1]);
+    if data.len < 6 { throw "truncated VoltFuscator child descriptor"; }
+    let size = data.len-4;
+    let proof = 0;
+    for i in 0..4 { proof = proof*256+data[size+i]; }
+    let descriptor = blob();
+    for i in 0..size { descriptor.push(data[i]); }
+    if checksum(descriptor) != proof { throw "VoltFuscator child descriptor checksum mismatch"; }
+    let reader = #{bytes:descriptor,at:0};
+    if reader.integer() != 3 { throw "unknown VoltFuscator child descriptor kind"; }
+    let body = reader.packet_bytes();
+    if reader.at != descriptor.len { throw "trailing VoltFuscator child descriptor data"; }
+    let values = #{bytes:body,at:0};
+    let meta = [];
+    for i in 0..9 { meta.push(values.integer()); }
+    if values.integer() != 1 || values.integer() != 1 || values.integer() != 4 ||
+       values.at != body.len { throw "unclassified VoltFuscator child capture"; }
+    meta
+}
+
+fn recover_77(text) {
+    let marker = "local Ti=[=[";
+    let parts = text.split(marker);
+    if parts.len != 2 { throw "VoltFuscator 7.7 payload marker not found"; }
+    let close = parts[1].index_of("]=]");
+    if close < 0 { throw "unterminated VoltFuscator 7.7 payload"; }
+    let wrapper = parts[0]+marker+"<payload>"+parts[1].sub_string(close);
+    if sha256(wrapper) != "753d8967fb90549fcdfb7fe5a021a07ae8b5d740f5c65d7a939da94e6726a260" {
+        throw "unsupported VoltFuscator 7.7 VM wrapper";
+    }
+    let payload = bytes(parts[1].sub_string(0,close));
+    if checksum(payload) != 1477830604 { throw "VoltFuscator 7.7 payload checksum mismatch"; }
+    let literals = keyed_literals(parts[0].split("local Y={")[1].split("};local M={}")[0]);
+    let entry = keyed_bootstrap(literals,0x653b6d3b);
+    let header = read_header(segment(entry,1,29,25,1245581342,176,300104183),9);
+    if header[8] != 2 { throw "unsupported VoltFuscator 7.7 root layout"; }
+    let image = prototype(segment(payload,header[0],header[1],header[2],header[5],header[6],header[3]));
+    if image["2"].length != 344 || image["5"] != [0,19,1,131] ||
+       image["1"].len != 14 || image["3"].len != 1 {
+        throw "unsupported VoltFuscator 7.7 root prototype";
+    }
+    let permutation = [];
+    for key in [0x24df17b6,0x2777458,1292742800,0x60ee2a87] {
+        permutation += permutation_group(keyed_bootstrap(literals,key),42,55);
+    }
+    let seen = #{};
+    for byte in permutation {
+        if seen[byte.to_string()] != () { throw "duplicate VoltFuscator 7.7 permutation byte"; }
+        seen[byte.to_string()] = true;
+    }
+
+    let prefix = [1,321,333,341,137,97];
+    let fetch = prefix+[105,13,109,113,69,73,77,81,85];
+    let compile = fetch+[197,209,213];
+    let execute = compile+[169,181,185];
+    let paths = [
+        prefix+[101,273,293,117,125,317],
+        fetch+[93,249,269,45,53],
+        compile+[221,145,165,297,5,9,61],
+        execute+[129,317],
+        execute+[193,225,245,305,313,129,317],
+    ];
+    let graph = loader_graph(image,header,paths);
+    // Neither record has an incoming edge in the audited dispatch.
+    verify_graph(image["2"],graph,[57,65],"9bd878c334bdb09434acf3078be252e35c9f3876f50fb54e500b98c9059e1ea4");
+
+    let closure = graph["73"];
+    let child_header = child_header77(image,closure,closure[0][2]);
+    if child_header[8] != 1 { throw "unsupported VoltFuscator 7.7 child layout"; }
+    let child = prototype(segment(payload,child_header[0],child_header[1],child_header[2],
+                                  child_header[5],child_header[6],child_header[3]));
+    if child["2"].length != 20 || child["5"] != [0,5,0,82] ||
+       child["1"].len != 2 || child["3"].len != 0 {
+        throw "unsupported VoltFuscator 7.7 fetch prototype";
+    }
+    let child_graph = loader_graph(child,child_header,[[1,17]]);
+    verify_graph(child["2"],child_graph,[],"a7e8c8ad61af1aee27468df8d582918a049bae6fe60e9af3ee210e1d4ef89c68");
+    let child_entry = child_graph["1"];
+    if quote(constant77(child,child_entry,permutation,child_entry[0][2],512)) != "\"game\"" ||
+       quote(constant77(child,child_entry,permutation,child_entry[0][7]-256,512)) != "\"HttpGet\"" {
+        throw "unclassified VoltFuscator 7.7 fetch operands";
+    }
+
+    let values = #{};
+    for operand in [
+        ["base",321,1,0,()],["id",321,10,256,()],["filename",321,11,256,()],
+        ["game",333,3,0,"\"game\""],["game_id",333,7,256,"\"GameId\""],
+        ["unmatched_print",273,3,0,"\"print\""],["unmatched",273,6,0,()],
+        ["unmatched_tostring",273,10,0,"\"tostring\""],
+        ["match_print",13,14,0,"\"print\""],["matched",13,18,0,()],
+        ["fetch_pcall",69,2,0,"\"pcall\""],["compile",197,2,0,"\"loadstring\""],
+        ["execute_pcall",169,3,0,"\"pcall\""],["http_print",249,2,0,"\"print\""],
+        ["fetch_error",249,6,0,()],["http_tostring",249,10,0,"\"tostring\""],
+        ["compile_print",145,2,0,"\"print\""],["compile_error",145,6,0,()],
+        ["compile_tostring",145,10,0,"\"tostring\""],
+        ["execute_print",225,1,0,"\"print\""],["runtime_error",225,6,0,()],
+        ["execute_tostring",225,10,0,"\"tostring\""],
+    ] {
+        let block = graph[operand[1].to_string()];
+        let value = constant77(image,block,permutation,block[0][operand[2]]-operand[3],4096);
+        if operand[4] != () && quote(value) != operand[4] {
+            throw "unclassified VoltFuscator 7.7 global operand";
+        }
+        values[operand[0]] = value;
+    }
+    if type_of(values.id) != "i64" || values.id < 1 { throw "invalid VoltFuscator GameId"; }
+    loader_environment("7.7","__voltfuscator_gGGtahSEFbMheZ",true)+
+    "local scripts = {["+values.id.to_string()+"] = "+quote(values.filename)+"}\n"+
+    "local game_id = environment.game.GameId\n"+
+    "local filename = scripts[game_id]\n"+
+    "if not filename then\n"+
+    "    environment.print("+quote(values.unmatched)+" .. environment.tostring(game_id))\n"+
+    "    return\n"+
+    "end\n\n"+
+    "environment.print("+quote(values.matched)+" .. filename)\n"+
+    "local ok, body = environment.pcall(function()\n"+
+    "    return environment.game:HttpGet("+quote(values.base)+" .. filename)\n"+
+    "end)\n"+
+    "if not ok then\n"+
+    "    environment.print("+quote(values.fetch_error)+" .. environment.tostring(body))\n"+
+    "    return\n"+
+    "end\n\n"+
+    "local script, message = environment.loadstring(body)\n"+
+    "if not script then\n"+
+    "    environment.print("+quote(values.compile_error)+" .. environment.tostring(message))\n"+
+    "    return\n"+
+    "end\n\n"+
+    "local ran, failure = environment.pcall(script)\n"+
+    "if not ran then\n"+
+    "    environment.print("+quote(values.runtime_error)+" .. environment.tostring(failure))\n"+
+    "end\n"
+}
+
+let text = source;
+text.replace("\r\n","\n");
+text.trim();
+if text.starts_with("([[This file was protected using Voltfuscator 7.7]])") { return recover_77(text); }
+let parts = text.split("local Bw=[=[");
+if parts.len != 2 { throw "VoltFuscator Nyx payload marker not found"; }
+let close = parts[1].index_of("]=]");
+if close < 0 { throw "unterminated VoltFuscator payload"; }
+let wrapper = parts[0]+"local Bw=[=[<payload>"+parts[1].sub_string(close);
+if sha256(wrapper) != "fc34c6c25740a2a8a32c82fd5361d2fe37205d9537d417d70d31b2bcf19caee1" {
+    throw "unsupported VoltFuscator VM wrapper";
+}
+let payload = bytes(parts[1].sub_string(0,close));
+// Header seeds and payload checksum originate in the matched immutable bootstrap.
+if checksum(payload) != 341672888 { throw "VoltFuscator payload checksum mismatch"; }
+let bootstrap = bytes(parts[0].split("local Sw=[=[")[1].split("]=]")[0]);
+let header_text = bootstrap_text(bootstrap,13156,35,82);
+let header = read_header(segment(header_text,1,25,22,1041071079,47,1501562621),8);
+let image = prototype(segment(payload,header[0],header[1],header[2],header[5],header[6],header[3]));
+let section = image["2"];
+if section.length != 48 || section.blocks.keys().len != 8 ||
+   image["1"].len != 4 || image["3"].len != 0 || image["5"] != [0,6,1,205] {
+    throw "unsupported VoltFuscator loader prototype";
+}
+let permutation = [];
+for entry in [[0x36c5,121,44],[0x132,122,93],[13866,123,212],[0x3792,125,159]] {
+    permutation += permutation_group(bootstrap_text(bootstrap,entry[0],entry[1],entry[2]),81,59);
+}
+let seen = #{};
+for entry in permutation {
+    if seen[entry.to_string()] != () { throw "duplicate VoltFuscator permutation byte"; }
+    seen[entry.to_string()] = true;
+}
+
+let salt = image["5"][3];
+let seed = header[7];
+let pcs = [1,17,33,41,45,5,9,13];
+let expected = [[52,3,0,0],[190,5120,0,0,25,5,4096,0,25,1,5,4864,25,0,0,0],
+                [177,3,0,3584,25,0,0,0],[42,0,3,1],[52,-11,0,0],[42,2,0,0],
+                [42,1,1,0],[3,0,1,0]];
+let endpoint = ();
+let slots = 0;
+for i in 0..pcs.len {
+    let pc = pcs[i];
+    let block = decode_block(section,pc,seed,0);
+    let words = block[0];
+    if words != expected[i] { throw "unclassified VoltFuscator instruction at "+pc.to_string(); }
+    slots += words.len/4;
+    if pc == 17 {
+        let names = ["\"loadstring\"","\"game\"","\"HttpGet\""];
+        let refs = [words[1],words[6],words[11]-256];
+        for j in 0..names.len {
+            let value = decode_string(image["1"],section,permutation,block[2],salt,0x3341226da092f,refs[j]);
+            if quote(value) != names[j] { throw "unclassified VoltFuscator environment operand"; }
+        }
+    } else if pc == 33 {
+        endpoint = decode_string(image["1"],section,permutation,block[2],salt,2093137290963650,words[3]);
+    }
+    let edges = block[1];
+    if i+1 < pcs.len {
+        if edges.len != 1 { throw "unsupported VoltFuscator control-flow edge"; }
+        seed = mod31(edges[0]-mod31(seed*131+pc*257+salt*65537)-pcs[i+1]*17);
+    } else if edges.len != 0 { throw "unexpected VoltFuscator return edge"; }
+}
+if endpoint == () || slots != section.length/4 { throw "unaccounted VoltFuscator instruction"; }
+
+loader_environment("7.6 Nyx","__voltfuscator_JBSjpVxTfEufnG",false)+
+"local compile = environment.loadstring\n"+
+"local game = environment.game\n"+
+"local chunk = compile(game:HttpGet("+quote(endpoint)+"))\n"+
+"chunk()\n"
+%%

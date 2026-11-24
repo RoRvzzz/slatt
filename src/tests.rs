@@ -6,6 +6,158 @@ const DEMO: &str = include_str!("../examples/demo.pfir");
 const SIMPLIFY: &str = include_str!("../examples/simplify.slatt");
 
 #[test]
+fn project_frontend_maps_and_passes_run_as_one_chain() {
+    let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/project");
+    let rules = folder.join("main.slatt");
+    let input = folder.join("input.lua");
+    let (script, frontend) = crate::rule_file(rules.to_str().unwrap(), None).unwrap();
+    let order = script
+        .passes
+        .iter()
+        .map(|pass| pass.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(order, ["constant_fold", "cleanup"]);
+    assert!(script.maps.contains_key("mix_vm"));
+    let result = crate::run_passes(rules.to_str().unwrap(), input.to_str().unwrap()).unwrap();
+    let instructions = &result[0].blocks[0].instructions;
+    assert_eq!(instructions.len(), 2);
+    assert_eq!(instructions[0].to_string(), "LOADK(r2, 108)");
+    assert_eq!(instructions[1].to_string(), "RETURN(r2)");
+    let recovered = crate::frontend::lower(
+        &frontend.unwrap(),
+        &std::fs::read_to_string(input).unwrap(),
+        true,
+    )
+    .unwrap()
+    .cast::<rhai::ImmutableString>();
+    assert_eq!(recovered, "return 108\n");
+}
+
+#[test]
+fn project_includes_resolve_once_and_report_errors() {
+    use std::{fs, time::SystemTime};
+
+    let directory = std::env::temp_dir().join(format!(
+        "slatt-project-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir(&directory).unwrap();
+    struct TestDirectory(std::path::PathBuf);
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let directory = TestDirectory(directory);
+    let path = |name| directory.0.join(name);
+    fs::write(
+        path("shared.slatt"),
+        "frontend\nlet base_value = 40;\nfn answer() { 2 }\n%%\npass shared { dce; }",
+    )
+    .unwrap();
+    fs::write(
+        path("a.slatt"),
+        "include \"shared.slatt\";\npass a { dce; }",
+    )
+    .unwrap();
+    fs::write(
+        path("b.slatt"),
+        "include \"./shared.slatt\";\npass b { dce; }",
+    )
+    .unwrap();
+
+    let root = path("unsaved.slatt");
+    let load = |source| crate::project::load(source, &root, "-");
+    let text = "// comment\ninclude \"a.slatt\";\ninclude \"b.slatt\";\nfrontend\n(base_value + answer()).to_string()\n%%";
+    let (script, ast) = load(text).unwrap();
+    assert_eq!(
+        script
+            .passes
+            .iter()
+            .map(|pass| pass.name.as_str())
+            .collect::<Vec<_>>(),
+        ["shared", "a", "b"]
+    );
+    let output = crate::frontend::lower(&ast.unwrap(), "", true)
+        .unwrap()
+        .cast::<rhai::ImmutableString>();
+    assert_eq!(output, "42");
+
+    let missing = load("\ninclude \"missing.slatt\";").err().unwrap();
+    assert!(missing.starts_with("-:2:1: include "));
+    let malformed = load("\ninclude \"a.slatt\"").err().unwrap();
+    assert!(malformed.starts_with("-:2:"));
+    let duplicate = load("include \"a.slatt\";\npass shared { dce; }")
+        .err()
+        .unwrap();
+    assert!(duplicate.contains("duplicate project pass shared"));
+
+    fs::write(
+        path("b.slatt"),
+        "include \"a.slatt\";\nfrontend\nfn answer() { 11 }\n%%",
+    )
+    .unwrap();
+    let duplicate = load("include \"b.slatt\";").err().unwrap();
+    assert!(duplicate.contains("duplicate project frontend function answer/0"));
+    fs::write(path("a.slatt"), "include \"b.slatt\";").unwrap();
+    let cycle = load("include \"a.slatt\";").err().unwrap();
+    assert!(cycle.contains("include cycle"));
+    assert!(cycle.contains("a.slatt") && cycle.contains("b.slatt"));
+
+    fs::write(path("bad.slatt"), "frontend\nlet value = ;\n%%\n").unwrap();
+    let syntax = load("include \"bad.slatt\";").err().unwrap();
+    assert!(syntax.contains("bad.slatt:2:"), "{syntax}");
+}
+
+#[test]
+fn source_frontend_receives_parsed_lua_tokens() {
+    let (_, script) = crate::frontend::parse(
+        "frontend\nif source_output { return lua_tokens(source); }\n42\n%%\n",
+    )
+    .unwrap();
+    let script = script.unwrap();
+    let converted = crate::frontend::lower(&script, "return (42) -- comment", true).unwrap();
+    assert_eq!(converted.cast::<rhai::ImmutableString>(), "return ( 42 )");
+    assert!(crate::frontend::lower(&script, "return (", true).is_err());
+    assert_eq!(
+        crate::frontend::lower(&script, "", false)
+            .unwrap()
+            .cast::<i64>(),
+        42,
+    );
+}
+
+#[test]
+fn moonveil_dispatch_keeps_both_payload_arms_and_rejects_cycles() {
+    let (_, script) = crate::frontend::parse(include_str!("../examples/moonveil.slatt")).unwrap();
+    let script = script.unwrap();
+    let source = r#"-- MoonVeil Obfuscator v1.2.2
+local scratch,map,lookup,handlers,state
+scratch={} map,lookup={[10]=20,[11]=30},function(k)return map[k+1]end
+handlers={[20]=function() if flag then print("left") else print("right") end
+    state=lookup(10);return true end}
+state=lookup(9)
+repeat while true do scratch[1]=handlers[state]
+    if scratch[1]~=nil then if scratch[1]() then break end end
+end until state==30"#;
+    let output = crate::frontend::lower(&script, source, true)
+        .unwrap()
+        .cast::<rhai::ImmutableString>();
+    assert!(output.contains(r#"if flag then print ( "left" ) else print ( "right" ) end"#));
+    assert!(!output.contains("lookup"));
+    let cycle = source.replace("state=lookup(10)", "state=lookup(9)");
+    assert!(
+        crate::frontend::lower(&script, &cycle, true)
+            .unwrap_err()
+            .contains("cyclic")
+    );
+}
+
+#[test]
 fn maps_folds_and_rewrites_a_raw_program() {
     let script = parse_script(RULES).unwrap();
     let mut program = parse_ir(DEMO, &script).unwrap();
@@ -313,4 +465,132 @@ fn rejects_every_truncated_prefix_of_compiled_chunks() {
             );
         }
     }
+}
+
+#[test]
+fn custom_vm_rules_remove_the_decoy_and_emit_both_native_formats() {
+    use crate::emit::{Dialect, emit};
+    let file = include_str!("../examples/deobfuscator/deobfuscate.slatt");
+    let fixture = include_str!("../examples/deobfuscator/obfuscated.pfir");
+    let script = parse_script(file).unwrap();
+    let mut program = parse_ir(fixture, &script).unwrap();
+    for pass in &script.passes {
+        pass.run(&mut program[0]).unwrap();
+    }
+    let rewritten = program[0].to_string();
+    assert!(!rewritten.contains("DECOY"));
+    assert!(!rewritten.contains("XOR32"));
+    assert!(rewritten.contains("BR_LT(r9, r6, @lower, @higher)"));
+    let reread = parse_ir(&rewritten, &script).unwrap();
+    for dialect in [Dialect::Lua51, Dialect::Luau] {
+        let bytes = emit(dialect, &reread).unwrap();
+        let lifted = crate::binary::import(&bytes).unwrap();
+        assert!(lifted[0].variadic);
+        assert_eq!(lifted[0].params, 0);
+        assert!(lifted[0].to_string().contains("VARARG(r9)"));
+        assert!(lifted[0].to_string().contains("\"high\""));
+    }
+}
+
+#[test]
+fn emitter_rejects_opaque_records_and_target_frame_overflow() {
+    use crate::emit::{Dialect, emit};
+    let script = parse_script("").unwrap();
+    for (ir, expected) in [
+        (
+            r#"proto p { @entry: NATIVE("lua51.CALL", 28); RETURN(); }"#,
+            "opaque instruction",
+        ),
+        (
+            "proto p { @entry: LOADK(r250, 9); RETURN(r250); }",
+            "register frame needs 251",
+        ),
+        (
+            "proto p { @entry: XOR32(r0, r1, r2); RETURN(r0); }",
+            "XOR32 needs a known result",
+        ),
+    ] {
+        let program = parse_ir(ir, &script).unwrap();
+        assert!(
+            emit(Dialect::Lua51, &program)
+                .unwrap_err()
+                .contains(expected)
+        );
+    }
+}
+
+#[test]
+fn emission_preserves_parameter_count_and_binary_constants() {
+    use crate::emit::{Dialect, emit};
+    let script = parse_script("").unwrap();
+    let source = r#"proto p params 2 vararg {
+      @entry: VARARG(r5, r2); LOADK(r3, "\xff\x00"); LOADK(r4, bits("7ff8000000012345")); RETURN(r1, r3, r4, r2, r5);
+    }"#;
+    let program = parse_ir(source, &script).unwrap();
+    for dialect in [Dialect::Lua51, Dialect::Luau] {
+        let bytes = emit(dialect, &program).unwrap();
+        let lifted = crate::binary::import(&bytes).unwrap();
+        assert_eq!(lifted[0].params, 2);
+        assert!(lifted[0].variadic);
+        let text = lifted[0].to_string();
+        assert!(text.contains("\"\\xff\\x00\""));
+        assert!(text.contains("bits(\"7ff8000000012345\")"));
+    }
+}
+
+#[test]
+fn threading_shortens_jump_chains_and_preserves_cycles() {
+    let script = parse_script("pass clean { thread jumps; prune unreachable; }").unwrap();
+    let source = r#"proto p {
+        @entry: BR_TRUE(r0, @next, @loop_a);
+        @next: JUMP(@again);
+        @again: JUMP(@done);
+        @done: RETURN();
+        @loop_a: JUMP(@loop_b);
+        @loop_b: JUMP(@loop_a);
+    }"#;
+    let mut program = parse_ir(source, &script).unwrap();
+    script.passes[0].run(&mut program[0]).unwrap();
+    let ir = program[0].to_string();
+    assert!(ir.contains("BR_TRUE(r0, @done, @loop_a)"));
+    assert!(!ir.contains("@next"));
+    assert!(!ir.contains("@again"));
+    assert!(ir.contains("@loop_a:\n    JUMP(@loop_b)"));
+    assert!(ir.contains("@loop_b:\n    JUMP(@loop_a)"));
+}
+
+#[test]
+fn lua51_round_trip_retains_native_loops_and_child_closures() {
+    use crate::emit::{Dialect, emit};
+    let original = include_bytes!("../tests/fixtures/native-lua51.luac");
+    let script = parse_script(include_str!("../examples/moonsec/recover.slatt")).unwrap();
+    let mut program = crate::binary::import(original).unwrap();
+    for proto in &mut program {
+        script.passes[0].run(proto).unwrap();
+    }
+    let emitted = emit(Dialect::Lua51, &program).unwrap();
+    let replay = crate::binary::import(&emitted).unwrap();
+    assert_eq!(replay.len(), 2);
+    for opcode in [
+        "lua51.CLOSURE",
+        "lua51.FORPREP",
+        "lua51.FORLOOP",
+        "lua51.CALL",
+    ] {
+        assert!(replay[0].to_string().contains(opcode));
+    }
+    assert!(replay[1].to_string().contains("lua51.SETUPVAL"));
+
+    let native = program[0]
+        .blocks
+        .iter_mut()
+        .flat_map(|block| &mut block.instructions)
+        .find(|inst| inst.op == Op::Native && inst.args.len() > 1)
+        .unwrap();
+    native.args[1] = crate::ir::Operand::Const(Const::Number(5.0));
+    assert!(
+        emit(Dialect::Lua51, &program)
+            .unwrap_err()
+            .contains("must come unchanged")
+    );
 }

@@ -3,7 +3,7 @@ const { checkRules } = require('./check');
 
 const opcodes = [
   'LOADK', 'MOVE', 'ADD', 'SUB', 'MUL', 'DIV', 'XOR32', 'JUMP', 'BR_TRUE',
-  'BR_EQ', 'BR_LT', 'BR_LE', 'RETURN', 'NATIVE', 'NATIVE_BRANCH', 'NATIVE_RETURN',
+  'BR_EQ', 'BR_LT', 'BR_LE', 'VARARG', 'RETURN', 'NATIVE', 'NATIVE_BRANCH', 'NATIVE_RETURN',
 ];
 
 function activate(context) {
@@ -29,7 +29,8 @@ function activate(context) {
     const controller = new AbortController();
     const timer = setTimeout(async () => {
       const executable = vscode.workspace.getConfiguration('slatt').get('executablePath') || 'slatt';
-      const finding = await checkRules(executable, document.getText(), controller.signal);
+      const sourcePath = document.uri.scheme === 'file' ? document.uri.fsPath : undefined;
+      const finding = await checkRules(executable, document.getText(), controller.signal, sourcePath);
       if (controller.signal.aborted || document.isClosed) return;
       pending.delete(key);
       if (!finding) {
@@ -48,8 +49,8 @@ function activate(context) {
   const provider = {
     provideCompletionItems(document) {
       const keywords = document.languageId === 'slatt'
-        ? ['pass', 'map', 'match', 'where', 'and', 'fold', 'constants', 'prune', 'unreachable', 'dce']
-        : ['proto', 'raw', 'using'];
+        ? ['include', 'frontend', 'pass', 'map', 'match', 'where', 'and', 'fold', 'constants', 'thread', 'jumps', 'prune', 'unreachable', 'dce']
+        : ['proto', 'raw', 'using', 'params', 'vararg'];
       const items = keywords.map((word) => new vscode.CompletionItem(word, vscode.CompletionItemKind.Keyword));
       for (const name of [...opcodes, 'const', 'known', 'bits']) {
         const item = new vscode.CompletionItem(name, vscode.CompletionItemKind.Function);
@@ -67,6 +68,9 @@ function activate(context) {
     vscode.languages.registerCompletionItemProvider(['slatt', 'slatt-ir'], provider),
     vscode.workspace.onDidOpenTextDocument(schedule),
     vscode.workspace.onDidChangeTextDocument(({ document }) => schedule(document)),
+    vscode.workspace.onDidSaveTextDocument(document => {
+      if (document.languageId === 'slatt') vscode.workspace.textDocuments.forEach(schedule);
+    }),
     vscode.workspace.onDidCloseTextDocument(({ uri }) => {
       cancel(uri.toString());
       diagnostics.delete(uri);

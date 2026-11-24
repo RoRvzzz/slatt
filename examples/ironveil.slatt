@@ -1,0 +1,667 @@
+frontend
+// shortcut: verified IronVeil v1 wrapper profile, extend when another wrapper is audited.
+fn base64(encoded) {
+    let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let data = bytes(encoded);
+    let decoded = blob();
+    let word = 0;
+    let bits = 0;
+    let padding = 0;
+    for i in 0..data.len {
+        if data[i] == 61 {
+            padding += 1;
+            continue;
+        }
+        let digit = alphabet.index_of(byte_char(data[i]));
+        if digit < 0 || padding > 0 { throw "invalid IronVeil base64 digit"; }
+        word = (word << 6) | digit;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            decoded.push(word >> bits);
+            word &= (1 << bits)-1;
+        }
+    }
+    if data.len % 4 != 0 || padding > 2 || padding*2 != bits || word != 0 {
+        throw "invalid IronVeil base64 padding";
+    }
+    decoded
+}
+
+fn unpack_payload(encoded) {
+    let key = 1632450099;
+    let cipher = base64(encoded);
+    if cipher.len < 4 || cipher.len % 2 != 0 { throw "invalid IronVeil LZW word count"; }
+    let state = key ^ 0x13579bdf;
+    for i in 0..cipher.len {
+        state ^= (state << 13) & 0xffffffff;
+        state ^= state >> 17;
+        state ^= (state << 5) & 0xffffffff;
+        cipher[i] ^= ((state & 255) + (key + (i+1)*29)) & 255;
+    }
+    if cipher[0] != 1 || cipher[1] != 0 { throw "missing IronVeil LZW clear word"; }
+    let initial = [];
+    for byte in 0..256 { initial.push(byte_char(byte).to_string()); }
+    initial.push(()); initial.push(());
+    let dictionary = initial;
+    let previous = "";
+    let output = "";
+    for offset in range(0,cipher.len,2) {
+        let code = (cipher[offset] << 8) | cipher[offset+1];
+        if code == 256 {
+            dictionary = initial;
+            previous = "";
+        } else if code == 257 {
+            if offset+2 != cipher.len { throw "trailing IronVeil LZW words"; }
+            return output;
+        } else {
+            let entry = if code < dictionary.len { dictionary[code] }
+                        else if code == dictionary.len && previous.len > 0 { previous + previous[0] }
+                        else { throw "invalid IronVeil LZW reference"; };
+            if previous.len > 0 { dictionary.push(previous + entry[0]); }
+            if dictionary.len > 4096 || output.len + entry.len > 65536 {
+                throw "IronVeil LZW output exceeds limit";
+            }
+            output += entry;
+            previous = entry;
+        }
+    }
+    throw "missing IronVeil LZW end word";
+}
+
+fn checksum(data) {
+    let hash = 921537334 ^ 0xa5a5a5a5;
+    for i in 0..data.len {
+        hash = (hash + data[i] + (i+1)*97) & 0xffffffff;
+        hash ^= (hash << 13) & 0xffffffff;
+        hash ^= hash >> 7;
+        hash ^= (hash << 17) & 0xffffffff;
+    }
+    hash
+}
+
+fn decimal(data, at, terminator) {
+    let sign = 1;
+    if data[at] == 45 { sign = -1; at += 1; }
+    let start = at;
+    let value = 0;
+    while at < data.len && data[at] != terminator {
+        let digit = data[at]-48;
+        if digit < 0 || digit > 9 || at-start >= 15 { throw "unsupported IronVeil number"; }
+        value = value*10 + digit;
+        at += 1;
+    }
+    if at == start || at >= data.len { throw "truncated IronVeil number"; }
+    [sign*value,at+1]
+}
+
+fn read_value(data, at, depth) {
+    if depth > 40 || at >= data.len { throw "invalid IronVeil value depth or bounds"; }
+    let tag = data[at]; at += 1;
+    if tag == 90 { return [(),at]; }
+    if tag == 78 { return decimal(data,at,59); }
+    if tag != 65 { throw "unsupported IronVeil value tag"; }
+    let size = decimal(data,at,91); at = size[1];
+    if size[0] < 0 || size[0] > 512 || size[0] >= data.len-at {
+        throw "invalid IronVeil array size";
+    }
+    let values = [];
+    for i in 0..size[0] {
+        let item = read_value(data,at,depth+1);
+        values.push(item[0]); at = item[1];
+    }
+    if data[at] != 93 { throw "unterminated IronVeil array"; }
+    [values,at+1]
+}
+
+fn wrapped_payload(source) {
+    source.replace("\r\n","\n");
+    source.trim();
+    if !source.starts_with("--[[\nObfuscated using ironveil v1") {
+        throw "IronVeil v1 wrapper not found";
+    }
+    let fragments = [];
+    let wrapper = source;
+    for literal in lua_strings(source) {
+        if literal.len >= 80 {
+            fragments.push(literal);
+            wrapper.replace("\"" + literal + "\"", "\"<fragment>\"");
+        }
+    }
+    let prefix = "g[26](r,921537334)~=";
+    let parts = wrapper.split(prefix);
+    if fragments.len != 6 || parts.len != 2 { throw "unsupported IronVeil fragment layout"; }
+    let suffix = parts[1].split(" then ");
+    let expected = parse_int(suffix[0]);
+    let checked = parts[0] + prefix + "CHECKSUM" + parts[1].sub_string(suffix[0].len);
+    if sha256(checked) != "d10ce155aae9852bbe124268f0928879fb9cff154321e5728e2ef706e3bdc522" {
+        throw "unsupported IronVeil VM wrapper";
+    }
+    let joined = "";
+    for fragment in fragments { joined += fragment; }
+    let image = bytes(unpack_payload(joined));
+    if checksum(image) != expected { throw "IronVeil payload checksum mismatch"; }
+    let value = read_value(image,0,0);
+    if value[1] != image.len { throw "trailing IronVeil payload data"; }
+    value[0]
+}
+
+fn decode_opcode(word, slot, key, salt) {
+    if type_of(word) != "i64" || word < 0 || word > 65535 { throw "invalid IronVeil opcode word"; }
+    let mask = ((key+slot*149+salt*53) ^ (slot*17+salt*29)) & 65535;
+    let extra = ((key >> (slot & 7)) ^ (slot*97+salt*11)) & 65535;
+    let shift = (slot+salt+key%7)%15+1;
+    let adjustment = (extra+salt+slot*3) & 65535;
+    let mixed = (mask+extra+shift) & 65535;
+    let raw = ((word ^ mixed)-adjustment) & 65535;
+    (((raw >> shift) | (raw << (16-shift))) ^ mask) & 65535
+}
+
+fn check_bank(bank, key, salt, codes, operations) {
+    if bank.len != codes.len { throw "invalid IronVeil opcode bank length"; }
+    for i in 0..codes.len {
+        let spec = if operations == () { [i+1] } else { [i+1,[1,operations[i]]] };
+        if bank[i].len != 2 || bank[i][1] != spec ||
+           decode_opcode(bank[i][0],i+1,key,salt) != codes[i] {
+            throw "unsupported IronVeil opcode bank record";
+        }
+    }
+}
+
+fn length(row, size) {
+    if type_of(row) != "array" || row.len != size { throw "invalid IronVeil record width"; }
+}
+
+fn advance(word, salt, lane) {
+    let state = this.chains[lane];
+    let slot = state[0]+1;
+    let mask = (state[1]*131 + state[2]*17 + salt + slot) & 65535;
+    let code = (decode_opcode(word,slot,this.key,salt) ^ mask) & 65535;
+    this.chains[lane] = [slot,code,(state[2]*257+code+salt+slot) & 65535];
+    code
+}
+
+fn normalize_member(row) {
+    if row[3] != 0 && row[3] != 1 { throw "unknown IronVeil member mode"; }
+    row[1] = this.expression(row[1]);
+    if row[3] == 1 { row[2] = this.expression(row[2]); }
+    row
+}
+
+fn field(row) {
+    let raw = this.advance(row[0],46191,0);
+    if raw == 25049 {
+        length(row,2);
+        return [0,this.expression(row[1])];
+    }
+    if raw == 25046 {
+        length(row,3);
+        return [1,row[1],this.expression(row[2])];
+    }
+    throw "unsupported IronVeil table field " + raw.to_string();
+}
+
+fn lvalue(row) {
+    let raw = this.advance(row[0],29961,0);
+    if raw == 18278 {
+        length(row,2);
+        return [0,row[1]];
+    }
+    if raw == 18277 {
+        length(row,4);
+        row[0] = 8;
+        return this.normalize_member(row);
+    }
+    throw "unsupported IronVeil assignment target " + raw.to_string();
+}
+
+fn expressions(rows) {
+    let values = [];
+    for row in rows { values.push(this.expression(row)); }
+    values
+}
+
+fn expression(row) {
+    let raw = this.advance(row[0],23000,0);
+    let kind = this.expression_codes.index_of(raw);
+    if kind < 0 { throw "unknown IronVeil expression " + raw.to_string(); }
+    length(row,[2,2,2,2,1,1,4,3,4,4,2,2,2][kind]);
+    row[0] = kind;
+    if kind == 6 || kind == 7 {
+        let binary = kind == 6;
+        let opcode = this.advance(row[1],if binary {41119} else {21442},1);
+        let operators = if binary {this.binary_codes} else {this.unary_codes};
+        row[1] = operators.index_of(opcode);
+        if row[1] < 0 { throw "unknown IronVeil operator " + opcode.to_string(); }
+        row[2] = this.expression(row[2]);
+        if binary { row[3] = this.expression(row[3]); }
+    } else if kind == 8 {
+        return this.normalize_member(row);
+    } else if kind == 9 {
+        if row[3] != 0 && row[3] != 1 { throw "unknown IronVeil call mode"; }
+        row[1] = this.expression(row[1]);
+        row[2] = this.expressions(row[2]);
+    } else if kind == 10 {
+        let fields = [];
+        for value in row[1] { fields.push(this.field(value)); }
+        row[1] = fields;
+    }
+    row
+}
+
+fn block(rows) {
+    let statements = [];
+    for row in rows { statements.push(this.statement(row)); }
+    statements
+}
+
+fn statement(row) {
+    let raw = this.advance(row[0],49444,0);
+    let kind = this.statement_codes.index_of(raw);
+    if kind < 0 { throw "unknown IronVeil statement " + raw.to_string(); }
+    length(row,[4,3,2,2,3,3,3,6,4,1,1,2,4][kind]);
+    row[0] = kind;
+    if kind == 0 || kind == 1 {
+        if kind == 1 {
+            let targets = [];
+            for target in row[1] { targets.push(this.lvalue(target)); }
+            row[1] = targets;
+        } else if row[3] != 0 {
+            throw "unsupported IronVeil predeclared local";
+        }
+        row[2] = this.expressions(row[2]);
+    } else if kind == 2 {
+        row[1] = this.expression(row[1]);
+    } else if kind == 3 {
+        row[1] = this.expressions(row[1]);
+    } else if kind == 4 {
+        let branches = [];
+        for branch in row[1] {
+            length(branch,2);
+            branches.push([this.expression(branch[0]),this.block(branch[1])]);
+        }
+        row[1] = branches;
+        if row[2] != () { row[2] = this.block(row[2]); }
+    } else if kind == 5 {
+        row[1] = this.expression(row[1]);
+        row[2] = this.block(row[2]);
+    } else if kind == 6 {
+        row[1] = this.block(row[1]);
+        row[2] = this.expression(row[2]);
+    } else if kind == 7 {
+        row[2] = this.expression(row[2]);
+        row[3] = this.expression(row[3]);
+        if row[4] != () { row[4] = this.expression(row[4]); }
+        row[5] = this.block(row[5]);
+    } else if kind == 8 {
+        row[2] = this.expressions(row[2]);
+        row[3] = this.block(row[3]);
+    } else if kind == 11 {
+        row[1] = this.block(row[1]);
+    } else if kind == 12 {
+        if row[1] != 0 && row[1] != 1 { throw "invalid IronVeil function declaration"; }
+        row[2] = this.lvalue(row[2]);
+    }
+    row
+}
+
+fn literal_bytes(token) {
+    if !token.starts_with("\"") || !token.ends_with("\"") { throw "invalid IronVeil pool literal"; }
+    let data = bytes(token);
+    let output = [];
+    let at = 1;
+    while at < data.len-1 {
+        let byte = data[at]; at += 1;
+        if byte == 92 {
+            byte = data[at]; at += 1;
+            if byte >= 48 && byte <= 57 {
+                byte -= 48;
+                let start = at;
+                while at < data.len-1 && at < start+2 && data[at] >= 48 && data[at] <= 57 {
+                    byte = byte*10 + data[at]-48; at += 1;
+                }
+            } else if byte == 110 { byte = 10; }
+            else if byte == 114 { byte = 13; }
+            else if byte == 116 { byte = 9; }
+            else if byte != 34 && byte != 92 { throw "unsupported IronVeil pool escape"; }
+        }
+        if byte > 255 { throw "invalid IronVeil pool byte"; }
+        output.push(byte);
+    }
+    output
+}
+
+fn expect(tokens, at, pattern) {
+    for token in pattern {
+        if tokens[at] != token { throw "unsupported IronVeil pool layout"; }
+        at += 1;
+    }
+    at
+}
+
+fn decode_pool(text, lookup) {
+    let tokens = lua_token_list("return {" + text + "}");
+    let at = expect(tokens,0,["return","{"]);
+    let cache = #{};
+    let pool = [];
+    while tokens[at] != "}" {
+        at = expect(tokens,at,[lookup,"[","{"]);
+        let data = literal_bytes(tokens[at]); at += 1;
+        while tokens[at] == ".." {
+            data += literal_bytes(tokens[at+1]);
+            at += 2;
+        }
+        at = expect(tokens,at,[","]);
+        let key = parse_int(tokens[at]);
+        at = expect(tokens,at+1,["}","]"]);
+        let identity = data.to_string();
+        if cache[identity] == () {
+            let decoded = [];
+            for i in 0..data.len { decoded.push(data[i] ^ ((key+i+1) & 255)); }
+            cache[identity] = decoded;
+        }
+        pool.push(cache[identity]);
+        if tokens[at] == "," { at += 1; }
+        else if tokens[at] != "}" { throw "invalid IronVeil pool separator"; }
+    }
+    if at+1 != tokens.len { throw "trailing IronVeil pool tokens"; }
+    pool
+}
+
+fn pool_entry(pool, index) {
+    if type_of(index) != "i64" || index < 1 || index > pool.len { throw "invalid IronVeil pool index"; }
+    pool[index-1]
+}
+
+fn quote(data) {
+    let result = "\"";
+    for byte in data {
+        if byte == 34 || byte == 92 { result += "\\" + byte_char(byte); }
+        else if byte >= 32 && byte <= 126 { result += byte_char(byte); }
+        else { result += "\\" + (byte/100).to_string() + (byte/10%10).to_string() + (byte%10).to_string(); }
+    }
+    result+"\""
+}
+
+fn name(index) { pool_entry(this.names,index) }
+
+fn pad(depth) {
+    let output = "";
+    for i in 0..depth { output += "    "; }
+    output
+}
+
+fn comma_separated(parts) {
+    let output = "";
+    for i in 0..parts.len {
+        if i > 0 { output += ", "; }
+        output += parts[i];
+    }
+    output
+}
+
+fn render_names(refs) {
+    let output = [];
+    for reference in refs { output.push(this.name(reference)); }
+    output
+}
+
+fn render_args(rows, depth) {
+    let output = [];
+    for row in rows { output.push(this.render_expr(row,depth)); }
+    comma_separated(output)
+}
+
+fn render_binary(operator, left, right, depth) {
+    let symbols = ["+","-","*","/","%","^","..","==","~=","<","<=",">",">="];
+    let symbol = if operator < symbols.len { symbols[operator] }
+                 else if operator == 18 { "and" } else if operator == 19 { "or" }
+                 else { throw "unsupported IronVeil binary operator for Lua 5.1"; };
+    "(" + this.render_expr(left,depth) + " " + symbol + " " + this.render_expr(right,depth) + ")"
+}
+
+fn render_mini(ops, depth) {
+    let stack = [];
+    for op in ops {
+        let code = op[0];
+        if code >= 1 && code <= 4 { stack.push([code-1,op[1]]); }
+        else if code == 5 { stack.push([4]); }
+        else if code == 6 { stack.push([8,stack.pop(),op[1],0]); }
+        else if code == 7 {
+            let key = stack.pop();
+            stack.push([8,stack.pop(),key,1]);
+        } else if code == 8 { stack.push([7,op[1]-1,stack.pop()]); }
+        else if code == 9 {
+            let right = stack.pop();
+            stack.push([6,op[1]-1,stack.pop(),right]);
+        } else { throw "unknown IronVeil mini opcode"; }
+    }
+    if stack.len != 1 { throw "invalid IronVeil mini stack"; }
+    this.render_expr(stack[0],depth)
+}
+
+fn render_expr(row, depth) {
+    let kind = row[0];
+    if kind == 0 {
+        let prefix = if this.global_refs.contains(row[1]) {"environment."} else {""};
+        return prefix+this.name(row[1]);
+    }
+    if kind == 1 { return quote(pool_entry(this.strings,row[1])); }
+    if kind == 2 { return row[1].to_string(); }
+    if kind == 3 { return if row[1] == 1 {"true"} else {"false"}; }
+    if kind == 4 { return "nil"; }
+    if kind == 5 { return "..."; }
+    if kind == 6 {
+        let left = row[2];
+        let right = row[3];
+        // The admitted program only uses small integers in these padded operations.
+        if row[1] <= 1 && left[0] == 6 && left[1] == 0 && left[3][0] == 2 &&
+           right[0] == 6 && right[1] == 1-row[1] && right[3] == left[3] {
+            return this.render_binary(row[1],left[2],right[2],depth);
+        }
+        return this.render_binary(row[1],left,right,depth);
+    }
+    if kind == 7 {
+        if row[1] == 1 && row[2][0] == 6 && row[2][1] == 10 {
+            return this.render_binary(11,row[2][2],row[2][3],depth);
+        }
+        if row[1] < 0 || row[1] > 2 { throw "unsupported IronVeil unary operator for Lua 5.1"; }
+        return ["-","not ","#"][row[1]] + this.render_expr(row[2],depth);
+    }
+    if kind == 8 {
+        let base = this.render_expr(row[1],depth);
+        if row[3] == 0 { return base+"."+this.name(row[2]); }
+        return base+"["+this.render_expr(row[2],depth)+"]";
+    }
+    if kind == 9 {
+        let callee = row[1];
+        let target = this.render_expr(callee,depth);
+        if row[3] == 1 {
+            if callee[0] != 8 || callee[3] != 0 { throw "unsupported IronVeil method receiver"; }
+            target = this.render_expr(callee[1],depth)+":"+this.name(callee[2]);
+        }
+        return target+"("+this.render_args(row[2],depth)+")";
+    }
+    if kind == 10 {
+        let output = [];
+        for field in row[1] {
+            if field[0] == 0 { output.push(this.render_expr(field[1],depth)); }
+            else { output.push(this.name(field[1])+" = "+this.render_expr(field[2],depth)); }
+        }
+        return "{"+comma_separated(output)+"}";
+    }
+    if kind == 11 { return this.render_function(row[1],"function",depth); }
+    if kind == 12 { return this.render_mini(row[1],depth); }
+    throw "unsupported IronVeil expression emission";
+}
+
+fn render_function(ref, header, depth) {
+    let prototype = pool_entry(this.prototypes,ref);
+    if this.visiting.contains(ref) { throw "recursive IronVeil prototype reference"; }
+    this.visiting.push(ref);
+    this.used[ref.to_string()] = true;
+    let args = this.render_names(prototype[0]);
+    if prototype[2] == 1 { args.push("..."); }
+    let body = this.render_block(prototype[1],depth+1);
+    this.visiting.pop();
+    header+"("+comma_separated(args)+")\n"+body+pad(depth)+"end"
+}
+
+fn render_block(rows, depth) {
+    let output = "";
+    for row in rows { output += this.render_stmt(row,depth); }
+    output
+}
+
+fn render_stmt(row, depth) {
+    let prefix = pad(depth);
+    let kind = row[0];
+    if kind == 0 {
+        let lhs = comma_separated(this.render_names(row[1]));
+        let rhs = this.render_args(row[2],depth);
+        return prefix+"local "+lhs+(if rhs == "" {""} else {" = "+rhs})+"\n";
+    }
+    if kind == 1 {
+        if row[1].len != 1 { throw "unsupported IronVeil multiple assignment"; }
+        return prefix+this.render_expr(row[1][0],depth)+" = "+this.render_args(row[2],depth)+"\n";
+    }
+    if kind == 2 { return prefix+this.render_expr(row[1],depth)+"\n"; }
+    if kind == 3 {
+        let rhs = this.render_args(row[1],depth);
+        return prefix+"return"+(if rhs == "" {""} else {" "+rhs})+"\n";
+    }
+    if kind == 4 {
+        let output = "";
+        for branch in row[1] {
+            let condition = branch[0];
+            if condition == [12,[[4,0]]] { continue; }
+            let keyword = if output == "" {"if "} else {"elseif "};
+            output += prefix+keyword+this.render_expr(condition,depth)+" then\n";
+            output += this.render_block(branch[1],depth+1);
+        }
+        if row[2] != () {
+            let keyword = if output == "" {"do\n"} else {"else\n"};
+            output += prefix+keyword+this.render_block(row[2],depth+1);
+        }
+        return if output == "" {""} else {output+prefix+"end\n"};
+    }
+    if kind == 5 {
+        return prefix+"while "+this.render_expr(row[1],depth)+" do\n"+
+               this.render_block(row[2],depth+1)+prefix+"end\n";
+    }
+    if kind == 6 {
+        return prefix+"repeat\n"+this.render_block(row[1],depth+1)+
+               prefix+"until "+this.render_expr(row[2],depth)+"\n";
+    }
+    if kind == 7 {
+        let limits = [row[2],row[3]];
+        if row[4] != () { limits.push(row[4]); }
+        return prefix+"for "+this.name(row[1])+" = "+this.render_args(limits,depth)+" do\n"+
+               this.render_block(row[5],depth+1)+prefix+"end\n";
+    }
+    if kind == 8 {
+        return prefix+"for "+comma_separated(this.render_names(row[1]))+" in "+this.render_args(row[2],depth)+" do\n"+
+               this.render_block(row[3],depth+1)+prefix+"end\n";
+    }
+    if kind == 9 { return prefix+"break\n"; }
+    if kind == 11 { return prefix+"do\n"+this.render_block(row[1],depth+1)+prefix+"end\n"; }
+    if kind == 12 {
+        let keyword = if row[1] == 1 {"local function "} else {"function "};
+        return prefix+this.render_function(row[3],keyword+this.render_expr(row[2],depth),depth)+"\n";
+    }
+    throw "unsupported IronVeil statement emission";
+}
+
+let image = wrapped_payload(source);
+if image.len != 4 || image[0] != 1 { throw "unsupported IronVeil image version"; }
+let meta = image[3];
+if meta.len != 6 || meta[0] < 1 || meta[0] > 65535 || meta[1] < 1 || meta[1] > 65535 {
+    throw "invalid IronVeil opcode seeds";
+}
+let binary_codes = [30137,30113,30117,30114,30118,30116,30127,30112,30121,30126,30140,30124,30123,30125,30139,30136,30115,30138];
+let unary_codes = [24283,24282,24284,24281];
+let expression_codes = [41030,41024,41027,41038,41031,41036,41026,41032,41025,41039,41037,41033,41034];
+let statement_codes = [10131,10139,10136,10213,10141,10215,10143,10130,10140,10137,10212,10138,10142];
+check_bank(meta[2],meta[1],48737,binary_codes,[10,11,12,13,14,15,16,20,21,22,23,24,25,30,31,32,33,34]);
+check_bank(meta[3],meta[1],52227,unary_codes,[40,41,42,43]);
+check_bank(meta[4],meta[1],12077,expression_codes,());
+check_bank(meta[5],meta[1],27998,statement_codes,());
+
+let prototypes = [];
+for i in 0..image[2].len {
+    let prototype = image[2][i];
+    length(prototype,3);
+    if prototype[2] != 0 && prototype[2] != 1 { throw "invalid IronVeil vararg flag"; }
+    let key = (meta[0]+(i+1)*1108) & 65535;
+    let decoder = #{
+        key: if key == 0 {1} else {key},
+        chains: [[0,0,0],[0,0,0]],
+        binary_codes: binary_codes + [30122,30119],
+        unary_codes: unary_codes,
+        expression_codes: expression_codes,
+        statement_codes: statement_codes,
+    };
+    prototypes.push([prototype[0],decoder.block(prototype[1]),prototype[2]]);
+}
+if image[1] != 7 || prototypes.len != 7 { throw "unsupported IronVeil prototype graph"; }
+let normalized = prototypes;
+let variable_fields = 0;
+for i in 0..normalized[6][1].len {
+    let row = normalized[6][1][i];
+    if row[0] == 0 && row[1] == [36] {
+        let value = row[2][0][1][1][2][1][3][1][1];
+        if type_of(value) != "i64" || value < 0 || value > 50 {
+            throw "IronVeil sample input exceeds its proven integer range";
+        }
+        normalized[6][1][i][2][0][1][1][2][1][3][1][1] = 0;
+        variable_fields += 1;
+    }
+}
+// With stock iteration, the variable data element keeps both sums below 246.
+// The graph check binds that proof to the original loops, calls and operands.
+if variable_fields != 1 || sha256(normalized.to_string()) != "960c727827b689298a44aace6e1fd76f1b7f0b67b52a7ff9e82bd3695472e801" {
+    throw "unsupported IronVeil payload graph";
+}
+
+let pool_text = source.split("Z[8]={f80[")[1].split("}Z[15]={");
+let encoded_strings = decode_pool("f80["+pool_text[0],"f80");
+let strings = [];
+for i in 0..encoded_strings.len { strings.push(encoded_strings[(i+4)%encoded_strings.len]); }
+let names = [];
+for value in decode_pool(pool_text[1].split("}g[57]")[0],"g80") {
+    let identifier = "";
+    for byte in value { identifier += byte_char(byte); }
+    names.push(identifier);
+}
+for rename in [[4,"initial"],[8,"total"],[9,"amount"],[10,"make_accumulator"],
+               [11,"values"],[15,"total"],[16,"index"],[17,"value"],[22,"weighted_sum"],
+               [26,"arguments"],[27,"parts"],[28,"index"],[35,"join_values"],[36,"data"],
+               [39,"self"],[40,"prefix"],[44,"accumulate"],[45,"weighted_total"],
+               [46,"total_with_label"],[51,"weighted_total"],[52,"weighted_values"],
+               [53,"index"],[57,"value"],[78,"main"]] {
+    names[rename[0]-1] = rename[1];
+}
+for rename in [["Kj","counter"],["bj","step"],["Ij","level"],["fj","result"]] {
+    let index = names.index_of(rename[0]);
+    if index < 0 { throw "missing IronVeil local name"; }
+    names[index] = rename[1];
+}
+let emitter = #{
+    prototypes:prototypes, names:names, strings:strings,
+    global_refs:[18,32,33,77], visiting:[7], used:#{"7":true},
+};
+let output = emitter.render_block(prototypes[6][1],0);
+if emitter.used.keys().len != prototypes.len { throw "unaccounted IronVeil prototype"; }
+// Payload lookups use _G, which may be distinct from the loader's environment.
+"local environment = _G or {}\n"+
+"local runtime_globals = {\n"+
+"    assert = assert, error = error, ipairs = ipairs, pairs = pairs, next = next,\n"+
+"    tonumber = tonumber, tostring = tostring, type = type, print = print, warn = warn,\n"+
+"    select = select, table = table, string = string, math = math, coroutine = coroutine,\n"+
+"    pcall = pcall, xpcall = xpcall, setmetatable = setmetatable, getmetatable = getmetatable,\n"+
+"    rawget = rawget, rawset = rawset,\n"+
+"}\n"+
+"for name, value in pairs(runtime_globals) do\n"+
+"    if environment[name] == nil then environment[name] = value end\n"+
+"end\n\n"+output
+%%

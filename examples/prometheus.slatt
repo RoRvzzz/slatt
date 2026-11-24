@@ -1,0 +1,182 @@
+frontend
+// shortcut: audited single-handler dispatchers, extend with independently verified layouts.
+fn expect(tokens, at, pattern) {
+    for token in pattern {
+        if tokens[at] != token { throw "unsupported Prometheus Weak wrapper"; }
+        at += 1;
+    }
+    at
+}
+
+fn decimal(token) {
+    let digits = bytes(token);
+    if digits.len == 0 || digits.len > 3 { throw "invalid Prometheus decimal"; }
+    let value = 0;
+    for i in 0..digits.len {
+        let digit = digits[i];
+        if digit < 48 || digit > 57 { throw "invalid Prometheus decimal"; }
+        value = value*10 + digit-48;
+    }
+    value
+}
+
+fn literal(token) {
+    if !token.starts_with("\"") || !token.ends_with("\"") {
+        throw "expected Prometheus quoted literal";
+    }
+    let data = bytes(token);
+    let output = "";
+    let at = 1;
+    while at < data.len-1 {
+        let byte = data[at];
+        at += 1;
+        if byte == 92 {
+            let digits = "";
+            while at < data.len-1 && digits.len < 3 && data[at] >= 48 && data[at] <= 57 {
+                digits += byte_char(data[at]); at += 1;
+            }
+            byte = decimal(digits);
+        }
+        if byte < 32 || byte > 126 { throw "invalid Prometheus encoded literal"; }
+        output += byte_char(byte);
+    }
+    output
+}
+
+fn decode(encoded, alphabet) {
+    if encoded.len % 4 != 0 { throw "invalid Prometheus base64 width"; }
+    let output = [];
+    let data = bytes(encoded);
+    for offset in range(0, data.len, 4) {
+        let word = 0;
+        let count = 0;
+        for i in 0..4 {
+            let digit = byte_char(data[offset+i]).to_string();
+            word <<= 6;
+            if digit == "=" {
+                if i < 2 || offset+4 != data.len { throw "invalid Prometheus base64 padding"; }
+            } else {
+                if count != i || alphabet[digit] == () { throw "invalid Prometheus base64 digit"; }
+                count += 1;
+                word |= alphabet[digit];
+            }
+        }
+        let pad_bits = (4-count)*2;
+        if ((word >> ((4-count)*6)) & ((1 << pad_bits)-1)) != 0 {
+            throw "noncanonical Prometheus base64 padding";
+        }
+        for i in 0..(count-1) { output.push((word >> (16-i*8)) & 255); }
+    }
+    output
+}
+
+fn quote(data) {
+    let output = "\"";
+    for byte in data {
+        if byte == 10 { output += "\\n"; }
+        else if byte == 13 { output += "\\r"; }
+        else if byte == 9 { output += "\\t"; }
+        else if byte == 34 || byte == 92 { output += "\\" + byte_char(byte); }
+        else if byte >= 32 && byte <= 126 { output += byte_char(byte); }
+        else { output += "\\" + (byte/100).to_string() + (byte/10%10).to_string() + (byte%10).to_string(); }
+    }
+    output + "\""
+}
+
+fn emit(invocation, stop_key) {
+    "local environment = getfenv and getfenv() or _ENV\n" +
+    "local unpack_values = unpack or table.unpack\n" +
+    "unpack_values({...})\n\n" +
+    "repeat\n" +
+    "    " + invocation + "\n" +
+    "until not environment[" + stop_key + "]\n\n" +
+    "return unpack_values({})\n"
+}
+
+fn recover_unpacked(tokens) {
+    let at = 0;
+    while at+4 < tokens.len && !(tokens[at] == "while" && tokens[at+1] == "o" &&
+           tokens[at+2] == "do" && tokens[at+3] == "Q" && tokens[at+4] == "=") { at += 1; }
+    let slot = at+5;
+    if slot+19 >= tokens.len { throw "unsupported Prometheus unpacked wrapper"; }
+    expect(tokens, slot+1, ["g","=","T","o","=","m","[","Q","]","Q","=","o","(",")","o","=","m","."]);
+    let stop = slot+19;
+    let call_key = literal(tokens[slot]);
+    let stop_key = tokens[stop];
+    let call_bytes = bytes(call_key);
+    let call_name = [];
+    for i in 0..call_bytes.len { call_name.push(call_bytes[i]); }
+    let template = "";
+    for i in 0..tokens.len {
+        if i != slot && i != stop { template += tokens[i] + " "; }
+    }
+    if sha256(template) != "77a5d5767b0c964b9577c61012613ac57d2c848819d1aebf4468b53b974f9141" {
+        throw "unsupported Prometheus unpacked dispatcher";
+    }
+    emit("environment[" + quote(call_name) + "]()", "\"" + stop_key + "\"")
+}
+
+let tokens = lua_token_list(source);
+if tokens.len < 100 || tokens.len > 1600 { throw "unsupported Prometheus wrapper size"; }
+if tokens[4] != "..." { return recover_unpacked(tokens); }
+let at = expect(tokens, 0, ["return","(","function","(","...",")","local","n","=","{"]);
+let pool_start = at;
+let pool = [];
+for i in 0..7 {
+    pool.push(literal(tokens[at])); at += 1;
+    if i < 6 {
+        if tokens[at] != "," && tokens[at] != ";" { throw "bad Prometheus pool separator"; }
+        at += 1;
+    }
+}
+at = expect(tokens, at, ["}"]);
+let pool_end = at-1;
+while tokens[at] != "M" || tokens[at+1] != "=" || tokens[at+2] != "{" {
+    at += 1;
+    if at+2 >= tokens.len { throw "missing Prometheus base64 alphabet"; }
+}
+at += 3;
+let alphabet_start = at;
+let alphabet = #{};
+let seen = [];
+for i in 0..64 {
+    let key = tokens[at];
+    at += 1;
+    if key == "[" {
+        key = literal(tokens[at]);
+        at = expect(tokens, at+1, ["]"]);
+    }
+    if key.len != 1 || !"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".contains(key) ||
+       alphabet[key] != () { throw "invalid Prometheus base64 alphabet key"; }
+    at = expect(tokens, at, ["="]);
+    let value = decimal(tokens[at]); at += 1;
+    if value > 63 || seen.contains(value) { throw "invalid Prometheus base64 alphabet value"; }
+    seen.push(value);
+    alphabet[key] = value;
+    if i < 63 {
+        if tokens[at] != "," && tokens[at] != ";" { throw "bad Prometheus alphabet separator"; }
+        at += 1;
+    }
+}
+expect(tokens, at, ["}"]);
+
+let template = "";
+for i in 0..tokens.len {
+    if i < pool_start || (i >= pool_end && i < alphabet_start) || i >= at {
+        template += tokens[i] + " ";
+    }
+}
+if sha256(template) != "3bda44258803a7eaf3c58d43c1dd0bacf0d069e19598619ff5d17bb500ed8bf9" {
+    throw "unsupported Prometheus Weak dispatcher";
+}
+
+// The wrapper reverses 1..7, 1..4 and 5..7, in that order.
+let constants = [];
+for slot in [3,4,5,6,0,1,2] { constants.push(decode(pool[slot], alphabet)); }
+if quote(constants[0]) != "\"unpack\"" || quote(constants[2]) != "\"__index\"" ||
+   quote(constants[3]) != "\"print\"" || quote(constants[5]) != "\"__len\"" ||
+   quote(constants[6]) != "\"__gc\"" { throw "unsupported Prometheus dispatcher constants"; }
+
+// The entry state is truthy. Only the final environment lookup can re-enter the loop.
+emit("environment.print(" + quote(constants[1]) + ")", quote(constants[4]))
+%%

@@ -221,6 +221,7 @@ impl Rule {
 pub enum Step {
     Fold,
     Rewrite(Rule),
+    Thread,
     Prune,
     Dce,
 }
@@ -235,6 +236,7 @@ impl Pass {
         for step in &self.steps {
             let result = match step {
                 Step::Fold => proto.fold_constants(),
+                Step::Thread => proto.thread_jumps(),
                 Step::Prune => proto.prune_unreachable(),
                 Step::Dce => proto.dce(),
                 Step::Rewrite(rule) => {

@@ -1,0 +1,12 @@
+include "frontend/ast.slatt";
+include "opcodes.slatt";
+include "passes/fold.slatt";
+include "passes/cleanup.slatt";
+
+frontend
+let operands = parse_mix(source);
+if source_output {
+    return render_lua(operands);
+}
+build_program(operands)
+%%

@@ -1,0 +1,92 @@
+frontend
+// shortcut: match the audited register VM wrapper; add layouts after verifying their handlers.
+let text = source;
+text.replace("\r\n", "\n");
+text.trim();
+let parts = text.split("[==[XHD:");
+if parts.len != 2 { throw "XHider payload is missing or ambiguous"; }
+let tail = parts[1];
+let close = tail.index_of("]==]");
+if close < 0 { throw "unterminated XHider payload"; }
+if sha256(parts[0] + "[==[XHD:" + tail.sub_string(close)) != "a8f9546c7476ba25282eef2f924f969a537e8dff5ea99155ee53d2cd4ad57eb3" {
+    throw "unsupported XHider wrapper";
+}
+
+let key = [1,146,27,178,189,0,0,0,0,0,0,0,145,81,99];
+let encrypted = [];
+for byte in bytes(tail.sub_string(0, close)) {
+    let byte = byte.to_int();
+    if byte == 122 { for j in 0..5 { encrypted.push(0); } }
+    else if byte >= 33 && byte <= 117 { encrypted.push(byte - 33); }
+    else if ![9,10,11,12,13,32].contains(byte) { throw "invalid XHider Base85 digit"; }
+}
+if encrypted.len % 5 == 1 { throw "invalid XHider Base85 tail"; }
+let compressed = [];
+for i in range(0, encrypted.len, 5) {
+    let count = min(5, encrypted.len - i);
+    let word = 0;
+    for j in 0..5 { word = word * 85 + if j < count { encrypted[i+j] } else { 84 }; }
+    if word > 4294967295 { throw "XHider Base85 overflow"; }
+    for j in 0..(count-1) {
+        compressed.push(((word >> (24 - 8*j)) & 255) ^ key[compressed.len % key.len]);
+    }
+}
+
+fn read(data, offset, width) {
+    if offset + width > data.len { throw "truncated XHider stream"; }
+    let value = 0;
+    for j in 0..width { value |= data[offset+j] << (8*j); }
+    value
+}
+let size = read(compressed, 0, 4);
+if size < 1 || size > 65536 { throw "unsupported XHider image size"; }
+let image = [];
+let offset = 4;
+while image.len < size {
+    let flags = read(compressed, offset, 1);
+    offset += 1;
+    for bit in 0..8 {
+        if image.len == size { break; }
+        if ((flags >> bit) & 1) == 0 {
+            image.push(read(compressed, offset, 1));
+            offset += 1;
+        } else {
+            let distance = read(compressed, offset, 2);
+            let count = read(compressed, offset + 2, 1) + 3;
+            offset += 3;
+            if distance < 1 || distance > image.len || count + image.len > size { throw "bad XHider back-reference"; }
+            for j in 0..count { image.push(image[image.len - distance]); }
+        }
+    }
+}
+if offset != compressed.len { throw "trailing XHider compressed data"; }
+if read(image, 0, 2) != 0 || read(image, 2, 4) != 4 { throw "unsupported XHider prototype"; }
+offset = 6;
+for row in [[0,0,0,0,1],[2,1,1,0,1],[1,0,2,1,1],[3,0,1,0,1]] {
+    for i in 0..4 { if read(image,offset+4*i,4) != row[i] { throw "unsupported XHider instruction"; } }
+    if read(image,offset+16,1) != row[4] { throw "unsupported XHider operand flags"; }
+    offset += 17;
+}
+if read(image,offset,4) != 2 { throw "unsupported XHider constant pool"; }
+offset += 4;
+let constants = [];
+for i in 0..2 {
+    if read(image,offset,1) != 3 { throw "unsupported XHider constant tag"; }
+    let length = read(image,offset+1,2);
+    offset += 3;
+    let value = "";
+    for j in 0..length {
+        let byte = read(image,offset+j,1);
+        if byte >= 32 && byte <= 126 && byte != 34 && byte != 92 {
+            value += byte_char(byte);
+        } else {
+            value += "\\" + (byte / 100).to_string() + (byte / 10 % 10).to_string() + (byte % 10).to_string();
+        }
+    }
+    constants.push(value);
+    offset += length;
+}
+if read(image,offset,4) != 0 || offset + 4 != image.len { throw "unsupported XHider children or trailing data"; }
+`getfenv()["${constants[0]}"]("${constants[1]}")
+`
+%%

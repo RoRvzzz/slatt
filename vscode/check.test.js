@@ -34,3 +34,12 @@ test('compiler checks unsaved source with no temporary files', { skip: !process.
   assert.equal(missing.toolError, true);
   assert.match(missing.message, /could not be found/);
 });
+
+test('unsaved project rules resolve includes relative to the editor file', { skip: !process.env.SLATT_TEST_EXE }, async () => {
+  const entry = path.resolve(__dirname, '../examples/project/main.slatt');
+  const source = fs.readFileSync(entry, 'utf8');
+  assert.equal(await checkRules(process.env.SLATT_TEST_EXE, source, undefined, entry), undefined);
+  const bad = await checkRules(process.env.SLATT_TEST_EXE, '\ninclude "missing.slatt";', undefined, entry);
+  assert.equal(bad.line, 1);
+  assert.match(bad.message, /include .*missing\.slatt/);
+});

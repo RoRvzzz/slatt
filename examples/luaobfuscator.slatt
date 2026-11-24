@@ -1,0 +1,46 @@
+frontend
+// shortcut: literal print-only Chaotic Good programs; extend only with proved control-flow lifting.
+let tokens = lua_tokens(source);
+let prefix = "local v0 = string . char ; local v1 = string . byte ; local v2 = string . sub ; local v3 = bit32 or bit ; local v4 = v3 . bxor ; local v5 = table . concat ; local v6 = table . insert ; local function v7 ( v8 , v9 ) local v10 = { } ; for v11 = 1 , # v8 do v6 ( v10 , v0 ( v4 ( v1 ( v2 ( v8 , v11 , v11 + 1 ) ) , v1 ( v2 ( v9 , 1 + ( v11 % # v9 ) , 1 + ( v11 % # v9 ) + 1 ) ) ) % 256 ) ) ; end return v5 ( v10 ) ; end";
+let literals = lua_strings(source);
+if literals.len != 2 { throw "expected two Chaotic Good string operands"; }
+let expected = prefix + " print ( v7 ( \"" + literals[0] + "\" , \"" + literals[1] + "\" ) )";
+if tokens != expected && tokens != expected + " ;" { throw "unsupported Chaotic Good decoder or output shape"; }
+
+fn decimal_bytes(text) {
+    let raw = bytes(text);
+    let decoded = [];
+    let i = 0;
+    while i < raw.len {
+        if raw[i] != 92 {
+            decoded.push(raw[i]);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let start = i;
+        let value = 0;
+        while i < raw.len && i < start + 3 && raw[i] >= 48 && raw[i] <= 57 {
+            value = value * 10 + raw[i] - 48;
+            i += 1;
+        }
+        if i == start || value > 255 { throw "unsupported Chaotic Good string escape"; }
+        decoded.push(value);
+    }
+    decoded
+}
+
+let data = decimal_bytes(literals[0]);
+let key = decimal_bytes(literals[1]);
+if key.len == 0 { throw "empty Chaotic Good key"; }
+let result = "";
+for i in 0..data.len {
+    let byte = data[i] ^ key[(i + 1) % key.len];
+    if byte >= 32 && byte <= 126 && byte != 34 && byte != 92 {
+        result += byte_char(byte);
+    } else {
+        result += "\\" + (byte / 100).to_string() + (byte / 10 % 10).to_string() + (byte % 10).to_string();
+    }
+}
+"print(\"" + result + "\")\n"
+%%

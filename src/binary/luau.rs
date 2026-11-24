@@ -154,7 +154,17 @@ pub(super) fn import(bytes: &[u8]) -> Result<Vec<Proto>, String> {
             lowered.push(Lowered { pc, instructions });
             pc += width;
         }
-        program.push(assemble(name, lowered)?);
+        if function.image.variadic
+            && lowered
+                .iter()
+                .skip(1)
+                .flat_map(|site| &site.instructions)
+                .flat_map(|inst| &inst.args)
+                .any(|target| target == &label(0))
+        {
+            return Err(format!("Luau {name} jumps into the vararg prologue"));
+        }
+        program.push(assemble(name, &function.image, lowered)?);
     }
     Ok(program)
 }
@@ -185,17 +195,20 @@ fn read_function(
     version: u8,
 ) -> Result<Function, String> {
     let stack = u16::from(r.byte()?);
-    let params = u16::from(r.byte()?);
+    let params = r.byte()?;
     let upvalues = usize::from(r.byte()?);
-    r.byte()?; // vararg
+    let variadic = r.boolean()?;
     let flags = r.byte()?;
-    if stack == 0 || params > stack {
+    if stack == 0 || u16::from(params) > stack {
         return Err(r.error("invalid Luau register frame"));
     }
     let types = r.var32()?;
     r.take(types)?;
     let count = r.var32()?;
     let words = r.words(count)?;
+    if variadic && words.first().copied() != Some(65 | u32::from(params) << 8) {
+        return Err(r.error("variadic prototype lacks its PREPVARARGS prologue"));
+    }
     let count = r.var32()?;
     let mut constants = Vec::with_capacity(r.count(count, 1)?);
     for _ in 0..count {
@@ -333,6 +346,8 @@ fn read_function(
         image: Image {
             stack,
             upvalues,
+            params,
+            variadic,
             words,
             constants,
         },
@@ -444,7 +459,7 @@ fn lower(
             )));
             code.push(inst(Op::Native, args));
         }
-        22 if b != 0 => code.push(image.return_fixed(a, b - 1)?),
+        22 if b != 0 => code.push(image.fixed_range(Op::Return, a, b - 1)?),
         22 => code.push(inst(Op::NativeReturn, opaque())),
         23 | 24 => code.push(jump(dest()?)),
         25 | 26 => {
@@ -513,6 +528,9 @@ fn lower(
             };
             code.push(branch(Op::NativeBranch, args, call + call_width, next));
         }
+        63 if b != 0 => code.push(image.fixed_range(Op::Vararg, a, b - 1)?),
+        65 if pc == 0 && image.variadic => {}
+        65 => return Err("PREPVARARGS outside a variadic prototype prologue".into()),
         67 => code.push(jump(target(pc, (word as i32) >> 8)?)),
         70 => return Err("CAPTURE outside closure instruction".into()),
         77..=80 => {

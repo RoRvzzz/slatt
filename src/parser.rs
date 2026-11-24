@@ -420,6 +420,10 @@ impl Parser {
                 steps.push(Step::Fold);
             } else if self.word("match") {
                 steps.push(Step::Rewrite(self.rule()?));
+            } else if self.word("thread") {
+                self.expect_word("jumps")?;
+                self.expect(';')?;
+                steps.push(Step::Thread);
             } else if self.word("prune") {
                 self.expect_word("unreachable")?;
                 self.expect(';')?;
@@ -428,9 +432,9 @@ impl Parser {
                 self.expect(';')?;
                 steps.push(Step::Dce);
             } else {
-                return Err(
-                    self.error("expected match, fold constants, prune unreachable, dce, or }")
-                );
+                return Err(self.error(
+                    "expected match, fold constants, thread jumps, prune unreachable, dce, or }",
+                ));
             }
         }
         Ok(Pass { name, steps })
@@ -466,6 +470,12 @@ impl Parser {
         mapping: Option<&BTreeMap<u32, Mapping>>,
     ) -> Result<Proto, String> {
         let mut blocks = Vec::new();
+        let params = if self.word("params") {
+            self.unsigned()?
+        } else {
+            0
+        };
+        let variadic = self.word("vararg");
         self.expect('{')?;
         while !self.take(Token::Symbol('}')) {
             self.expect('@')?;
@@ -491,10 +501,35 @@ impl Parser {
             }
             blocks.push(Block { name, instructions });
         }
-        let proto = Proto { name, blocks };
+        let proto = Proto {
+            name,
+            params,
+            variadic,
+            blocks,
+            lua51: None,
+        };
         proto.verify().map_err(|error| self.error(error))?;
         Ok(proto)
     }
+}
+
+pub fn parse_include(line: &str) -> Result<String, String> {
+    let mut p = Parser::new(line)?;
+    p.expect_word("include")?;
+    let path = match p.peek() {
+        Token::String(bytes) => std::str::from_utf8(bytes)
+            .ok()
+            .filter(|path| !path.is_empty() && !path.chars().any(char::is_control))
+            .ok_or_else(|| p.error("expected a nonempty UTF-8 include path"))?
+            .to_owned(),
+        _ => return Err(p.error("expected a quoted include path")),
+    };
+    p.position += 1;
+    p.expect(';')?;
+    if p.peek() != &Token::End {
+        return Err(p.error("expected end of include line"));
+    }
+    Ok(path)
 }
 
 pub fn parse_script(source: &str) -> Result<Script, String> {

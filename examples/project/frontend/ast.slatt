@@ -1,0 +1,12 @@
+include "grammar.slatt";
+
+frontend
+fn build_program(operands) {
+    "raw proto demo using mix_vm {\n  @entry:\n    41(" + operands[0] + ", r0);\n    41(" +
+        operands[1] + ", r1);\n    52(r2, r0, r1);\n    99(r2);\n}\n"
+}
+
+fn render_lua(operands) {
+    "return " + (operands[0] ^ operands[1]).to_string() + "\n"
+}
+%%
