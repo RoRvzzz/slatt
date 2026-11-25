@@ -1,0 +1,181 @@
+frontend
+fn snowveil_chunk(token) {
+    let raw = bytes(token);
+    if raw.len < 2 || raw[0] != 34 || raw[raw.len-1] != 34 {
+        throw "expected SnowVeil double-quoted data";
+    }
+    raw.extract(1,raw.len-2)
+}
+
+fn snowveil_integer(token) {
+    token.replace("_", "");
+    if token.starts_with("0x") || token.starts_with("0X") { return parse_int(token.sub_string(2),16); }
+    if token.starts_with("0b") || token.starts_with("0B") { return parse_int(token.sub_string(2),2); }
+    parse_int(token)
+}
+
+fn snowveil_packed() {
+    let at = this.index_of("concat",0);
+    while at >= 5 {
+        if this.join_lua_tokens(at-5,at+3) == "local H = table . concat ( { " { break; }
+        at = this.index_of("concat",at+1);
+    }
+    if at < 5 { throw "SnowVeil v3.9 bootstrap stream missing"; }
+    at += 3;
+    let chunks = [];
+    while this[at] != "}" {
+        chunks.push(this[at]);
+        at += 1;
+        if this[at] == "," { at += 1; }
+        else if this[at] != "}" { throw "invalid SnowVeil stream table"; }
+    }
+    let begin = at;
+    let alphabet_at = at+5;
+    let seed_at = this.index_of("s",alphabet_at+1)-2;
+    if seed_at < alphabet_at || this.join_lua_tokens(seed_at-3,seed_at) != "local d = " ||
+       this.join_lua_tokens(seed_at+1,seed_at+6) != "local s = { } " {
+        throw "unsupported SnowVeil bootstrap seed declaration";
+    }
+    let size_at = this.index_of("sub",seed_at+6)+11;
+    if size_at <= seed_at || this.join_lua_tokens(size_at-16,size_at) !=
+       "local H = string . sub ( table . concat ( s ) , 0X1 , " {
+        throw "unsupported SnowVeil bootstrap length declaration";
+    }
+    let finish = this.index_of("concat",begin+1);
+    while finish >= 0 && this.join_lua_tokens(finish-5,finish+8) !=
+          "local d = table . concat ( F ) H = nil local " {
+        finish = this.index_of("concat",finish+1);
+    }
+    if finish < size_at { throw "SnowVeil bootstrap decoder missing"; }
+    let shape = this.join_lua_tokens(begin,alphabet_at) + "<alphabet> " +
+                this.join_lua_tokens(alphabet_at+1,seed_at) + "<seed> " +
+                this.join_lua_tokens(seed_at+1,size_at) + "<size> " +
+                this.join_lua_tokens(size_at+1,finish+7);
+    if sha256(shape) != "1a2a19eb4bc4e6f9707aa6817eaf1a33570dc5af2a0b9c30a529ee2ceefd2a23" {
+        throw "unsupported SnowVeil v3.9 bootstrap decoder";
+    }
+    let seed = snowveil_integer(this[seed_at]);
+    let size = snowveil_integer(this[size_at]);
+    if seed < 0 || seed > 0xffffffff || size < 1 || size > 262144 {
+        throw "SnowVeil bootstrap seed or size out of range";
+    }
+    snowveil_decrypt(chunks,snowveil_chunk(this[alphabet_at]),seed,size)
+}
+
+fn snowveil_decrypt(chunks, alphabet, key, limit) {
+    if alphabet.len != 85 { throw "invalid SnowVeil alphabet length"; }
+    let digits = [];
+    for _byte in 0..256 { digits.push(-1); }
+    for i in 0..alphabet.len {
+        let byte = alphabet[i];
+        if digits[byte] >= 0 { throw "duplicate SnowVeil Base85 digit"; }
+        digits[byte] = i;
+    }
+    let output = blob();
+    let width = 0;
+    let word = 0;
+    let total = 0;
+    for chunk in chunks {
+        let raw = snowveil_chunk(chunk);
+        for i in 0..raw.len {
+            let byte = raw[i];
+            let digit = digits[byte];
+            if digit < 0 { throw "unknown SnowVeil Base85 digit"; }
+            word = word*85 + digit;
+            width += 1;
+            if width != 5 { continue; }
+            if word > 0xffffffff { throw "SnowVeil Base85 word overflow"; }
+            key ^= (key << 13) & 0xffffffff;
+            key ^= key >> 17;
+            key ^= (key << 5) & 0xffffffff;
+            word ^= key;
+            for shift in [24,16,8,0] {
+                let byte = (word >> shift) & 255;
+                if total < limit { output.push(byte); }
+                total += 1;
+            }
+            word = 0;
+            width = 0;
+        }
+    }
+    if width != 0 || output.len != limit || total-limit > 3 {
+        throw "invalid SnowVeil packed stream length";
+    }
+    output
+}
+
+fn snowveil_inflate() {
+    let output = blob();
+    let at = 0;
+    let limit = this.len;
+    while at < limit {
+        let flags = this[at];
+        at += 1;
+        for bit in 0..8 {
+            if at == limit { break; }
+            if (flags & (1 << bit)) != 0 {
+                output.push(this[at]);
+                at += 1;
+            } else {
+                if at+1 >= limit { throw "truncated SnowVeil back-reference"; }
+                let lo = this[at];
+                let hi = this[at+1];
+                at += 2;
+                let distance = lo + ((hi & 15) << 8) + 1;
+                if distance > output.len { throw "invalid SnowVeil back-reference"; }
+                for _copy in 0..((hi >> 4)+3) { output.push(output[output.len-distance]); }
+            }
+        }
+        if output.len > 262144 { throw "SnowVeil bootstrap inflate limit"; }
+    }
+    output
+}
+
+fn snowveil_verify(with_inventory) {
+    let cursor = byte_cursor(this);
+    if cursor.take(8).as_string() != "SVBG\x1c\n\x01\x01" {
+        throw "unsupported SnowVeil SVBG header";
+    }
+    let reserved = cursor.read_varuint();
+    let count = cursor.read_varuint();
+    if reserved != 0 || count != 82 { throw "unexpected SnowVeil prototype count"; }
+    let records = [];
+    for record in 1..(count+1) {
+        let offset = cursor.offset;
+        if cursor.read_uint(1,false) != 0 { throw "unsupported SnowVeil prototype record tag"; }
+        let size = cursor.read_varuint();
+        let expected = cursor.read_uint(4,false);
+        let data = cursor.take(size);
+        if data.adler32() != expected { throw "SnowVeil prototype checksum mismatch: " + record.to_string(); }
+        if with_inventory {
+            records.push(#{index: record, offset: offset, size: size, adler32: expected});
+        }
+    }
+    if cursor.remaining != 0 { throw "trailing data in SnowVeil bootstrap"; }
+    #{count: count, records: records}
+}
+
+fn snowveil_emit(count) {
+    let output = "-- SnowVeil v3.9 SVBG bootstrap image, " + count.to_string() + " verified records\nreturn \"";
+    for at in 0..this.len {
+        let byte = this[at];
+        if at > 0 && at % 4096 == 0 { output += "\" ..\n    \""; }
+        if byte >= 32 && byte <= 126 && byte != 34 && byte != 92 { output += byte_char(byte); }
+        else { output += "\\" + (byte/100).to_string() + (byte/10%10).to_string() + (byte%10).to_string(); }
+    }
+    output + "\"\n"
+}
+
+if !source.starts_with("-- This file was generated using SnowVeil v3.9 [") {
+    throw "expected a SnowVeil v3.9 loader";
+}
+let tokens = lua_token_buffer(source);
+let compressed = tokens.snowveil_packed();
+let image = compressed.snowveil_inflate();
+let inventory = image.snowveil_verify(!source_output);
+if source_output {
+    image.snowveil_emit(inventory.count)
+} else {
+    #{image_size: image.len, sha256: sha256(image), count: inventory.count, records: inventory.records}
+}
+%%

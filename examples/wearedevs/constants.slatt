@@ -1,0 +1,217 @@
+include "grammar.slatt";
+
+frontend
+fn base85(value, alphabet, begin) {
+    if (value.len-begin) % 5 == 1 { throw "invalid WeAreDevs base85 width"; }
+    let decoded = [];
+    for at in range(begin,value.len,5) {
+        let width = min(5,value.len-at);
+        let word = 0;
+        for i in 0..5 {
+            let digit = if i < width { alphabet[value[at+i].to_string()] } else { 84 };
+            if digit == () { throw "unknown WeAreDevs base85 digit"; }
+            word = word * 85 + digit;
+        }
+        for i in 0..(width-1) { decoded.push((word >> (24-8*i)) & 255); }
+    }
+    decoded
+}
+
+fn base64(value, alphabet, begin) {
+    if (value.len-begin) % 4 != 0 { throw "invalid WeAreDevs base64 width"; }
+    let output = [];
+    for at in range(begin,value.len,4) {
+        let word = 0;
+        let count = 0;
+        for i in 0..4 {
+            let digit = value[at+i];
+            word <<= 6;
+            if digit == 61 {
+                if i < 2 || at+4 != value.len { throw "invalid WeAreDevs base64 padding"; }
+            } else {
+                let decoded = alphabet[digit.to_string()];
+                if decoded == () || count != i { throw "unknown WeAreDevs base64 digit"; }
+                word |= decoded;
+                count += 1;
+            }
+        }
+        for i in 0..(count-1) { output.push((word >> (16-i*8)) & 255); }
+    }
+    output
+}
+
+fn separators(at) {
+    while at < this.len && this[at] == ";" { at += 1; }
+    at
+}
+fn reverse_range(pool, first, last) {
+    if first < 1 || first > last || last > pool.len { throw "invalid WeAreDevs reversal"; }
+    let left = first-1;
+    let right = last-1;
+    while left < right {
+        let temporary = pool[left];
+        pool[left] = pool[right];
+        pool[right] = temporary;
+        left += 1;
+        right -= 1;
+    }
+    pool
+}
+
+fn read_alphabet(begin) {
+    let at = begin;
+    let alphabet = #{};
+    let digits = [];
+    while this[at] != "}" {
+        let key;
+        if this[at] == "[" {
+            let decoded = literal_bytes(this[at+1]);
+            if decoded.len != 1 { throw "invalid WeAreDevs alphabet key"; }
+            key = decoded[0];
+            at = this.require_tokens(at+2,["]"]);
+        } else {
+            let raw = bytes(this[at]);
+            if raw.len != 1 { throw "invalid WeAreDevs alphabet identifier"; }
+            key = raw[0];
+            at += 1;
+        }
+        let value = this.integer_expr(this.require_tokens(at,["="]));
+        if value[0] < 0 || value[0] > 84 || digits.contains(value[0]) || alphabet[key.to_string()] != () {
+            throw "invalid WeAreDevs alphabet entry";
+        }
+        alphabet[key.to_string()] = value[0];
+        digits.push(value[0]);
+        at = value[1];
+        if this[at] == "," || this[at] == ";" { at += 1; }
+        else if this[at] != "}" { throw "invalid WeAreDevs alphabet separator"; }
+    }
+    let base = digits.len;
+    if (base != 64 && base != 85) || digits.some(|value| value >= base) {
+        throw "alphabet isn't a WeAreDevs digit permutation";
+    }
+    #{digits: alphabet, base: base, begin: begin, end: at}
+}
+fn read_alphabets(from, limit) {
+    let tables = #{};
+    let at = from;
+    while at+4 < limit {
+        if this[at] == "local" && this[at+2] == "=" && this[at+3] == "{" {
+            let candidate = ();
+            try { candidate = this.read_alphabet(at+4); } catch { }
+            if candidate != () {
+                let name = this[at+1];
+                if tables.contains(name) { throw "ambiguous WeAreDevs alphabet alias"; }
+                tables[name] = candidate;
+                at = candidate.end;
+            }
+        }
+        at += 1;
+    }
+    if tables.keys().is_empty() || tables.keys().len > 2 { throw "unsupported WeAreDevs decoding tables"; }
+    tables
+}
+fn codec_branches(from, limit, tables) {
+    let markers = #{};
+    for at in from..(limit-4) {
+        if (this[at] != "if" && this[at] != "elseif") || this[at+2] != "==" ||
+           this[at+4] != "then" { continue; }
+        let literal = this[at+3];
+        if !literal.starts_with("\"") && !literal.starts_with("'") { continue; }
+        let value = literal_bytes(literal);
+        if value.len != 1 || value[0] == 61 { continue; }
+        for i in (at+5)..(limit-1) {
+            if this[i] == "elseif" || this[i] == "else" { break; }
+            let name = this[i];
+            if tables.contains(name) && this[i+1] == "[" {
+                let key = value[0].to_string();
+                if markers.contains(key) && markers[key] != name { throw "ambiguous WeAreDevs codec marker"; }
+                markers[key] = name;
+                break;
+            }
+        }
+    }
+    markers
+}
+fn decode_pool_value(value, tables, markers) {
+    let alphabet;
+    let begin = 0;
+    if markers.keys().len != 0 {
+        if value.len == 0 || !markers.contains(value[0].to_string()) { throw "unknown WeAreDevs codec marker"; }
+        alphabet = tables[markers[value[0].to_string()]];
+        begin = 1;
+    } else {
+        if tables.keys().len != 1 { throw "unresolved WeAreDevs codec routing"; }
+        alphabet = tables.values()[0];
+    }
+    if alphabet.base == 85 { return base85(value,alphabet.digits,begin); }
+    base64(value,alphabet.digits,begin)
+}
+
+fn read_reversals(at, pool) {
+    at = this.require_tokens(at+4,["in","ipairs","(","{"]);
+    while this[at] != "}" {
+        let first = this.integer_expr(this.require_tokens(at,["{"]));
+        if ![",",";"].contains(this[first[1]]) { throw "invalid WeAreDevs reversal pair"; }
+        let last = this.integer_expr(first[1]+1);
+        at = this.require_tokens(last[1],["}"]);
+        pool = reverse_range(pool,first[0],last[0]);
+        if this[at] == "," || this[at] == ";" { at += 1; }
+        else if this[at] != "}" { throw "invalid WeAreDevs reversal separator"; }
+    }
+    [pool, at]
+}
+
+fn read_pool() {
+    let at = this.require_tokens(0,["return","(","function","(","...",")","local"]);
+    let name = this[at];
+    at = this.require_tokens(at+1,["=","{"]);
+    let pool_begin = at;
+    let pool = [];
+    while this[at] != "}" {
+        pool.push(literal_bytes(this[at]));
+        at += 1;
+        if this[at] == "," || this[at] == ";" { at += 1; }
+        else if this[at] != "}" { throw "invalid WeAreDevs pool separator"; }
+    }
+    let pool_end = at;
+    let reversals = [];
+    at = this.separators(at+1);
+    if this[at] == "for" {
+        let reversed = this.read_reversals(at,pool);
+        reversals.push([at,reversed[1]]);
+        pool = reversed[0];
+        at = this.seek(reversed[1],["local","function"]);
+    }
+    at = this.require_tokens(at,["local","function"]);
+    let getter = this[at];
+    let parameter = this[at+2];
+    at = this.require_tokens(at+1,["(",parameter,")","return",name,"[",parameter]);
+    // Evaluate the index expression at parameter zero to recover its bias.
+    let index_start = at-1;
+    let index_end = this.seek(at,["]"]);
+    let expression = ["0"] + this.extract(at,index_end-at);
+    let offset = expression.integer_expr(0);
+    at = this.require_tokens(index_start+offset[1],["]"]);
+    at = this.separators(this.require_tokens(this.separators(at),["end"]));
+    if this[at] == "for" {
+        let reversed = this.read_reversals(at,pool);
+        reversals.push([at,reversed[1]]);
+        pool = reversed[0];
+        at = reversed[1];
+    }
+
+    let bootstrap_end = this.seek(at,["return","(","function","("]);
+    let alphabets = this.read_alphabets(at,bootstrap_end);
+    let last_table = 0;
+    let base85_span = [];
+    for alphabet in alphabets.values() {
+        last_table = max(last_table,alphabet.end);
+        if alphabet.base == 85 { base85_span = [alphabet.begin,alphabet.end]; }
+    }
+    let markers = this.codec_branches(last_table+1,bootstrap_end,alphabets);
+    let decoded = pool.map(|value| decode_pool_value(value,alphabets,markers));
+    [decoded, offset[0], [pool_begin,pool_end], base85_span,
+     #{table: name, getter: getter, alphabets: alphabets.keys().len, markers: markers.keys().len,
+       reversals: reversals}]
+}
+%%

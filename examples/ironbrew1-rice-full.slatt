@@ -1,0 +1,5 @@
+include "ironbrew1-rice.slatt";
+
+frontend
+lift_tree(root,plans,"0")
+%%

@@ -1,0 +1,10 @@
+include "lift.slatt";
+include "dispatch.slatt";
+
+frontend
+let tokens;
+try { tokens = lua_token_buffer(source); } catch { tokens = lua_token_list(source); }
+let payload = ();
+try { payload = tokens.lift_program(); } catch { }
+if payload == () { tokens.rewrite_dispatch(source) } else { payload }
+%%

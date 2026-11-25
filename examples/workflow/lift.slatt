@@ -1,0 +1,6 @@
+include "format.slatt";
+
+frontend
+let program = lift_workflow(input_bytes);
+if output_mode == "inspect" { program.cfg() } else { program }
+%%

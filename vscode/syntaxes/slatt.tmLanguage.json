@@ -18,7 +18,7 @@
     },
     { "name": "keyword.control.slatt", "match": "\\b(?:include|frontend|pass|map|proto|raw|using|params|vararg|match|where|and|fold|constants|thread|jumps|prune|unreachable|dce)\\b" },
     { "name": "support.function.builtin.slatt", "match": "\\b(?:const|known|bits)\\b(?=\\s*\\()" },
-    { "name": "support.function.opcode.slatt", "match": "\\b(?:LOADK|MOVE|ADD|SUB|MUL|DIV|XOR32|JUMP|BR_TRUE|BR_EQ|BR_LT|BR_LE|VARARG|RETURN|NATIVE|NATIVE_BRANCH|NATIVE_RETURN)\\b(?=\\s*\\()" },
+    { "name": "support.function.opcode.slatt", "match": "\\b(?:NOP|LOADK|MOVE|GETGLOBAL|CALL|CALL_OPEN|CALL_FROM_TOP|TAILCALL|CLOSURE|CLOSEUPVALS|GETUPVAL|SETUPVAL|NEWTABLE|GETTABLE|SETTABLE|SELF|SETLIST|NOT|LEN|POW|CONCAT|EQ|NE|LT|ADD|SUB|MUL|DIV|XOR32|JUMP|JUMP_TABLE|FOR_NEXT|BR_TRUE|BR_EQ|BR_LT|BR_LE|VARARG|RETURN|RETURN_TOP|NATIVE|NATIVE_BRANCH|NATIVE_RETURN)\\b(?=\\s*\\()" },
     { "name": "variable.parameter.slatt", "match": "\\$(?:[A-Za-z_][A-Za-z_0-9]*|[0-9]+)\\b" },
     { "name": "entity.name.label.slatt", "match": "@[A-Za-z_][A-Za-z_0-9]*\\b" },
     { "name": "variable.other.register.slatt", "match": "\\br[0-9]+\\b" },

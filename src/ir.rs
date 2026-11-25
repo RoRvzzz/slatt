@@ -77,6 +77,13 @@ pub enum Type {
     Reg,
     Const,
     Block,
+    Capture,
+}
+
+impl Type {
+    pub(crate) fn accepts(self, actual: Self) -> bool {
+        self == actual || (self == Self::Capture && matches!(actual, Self::Reg | Self::Const))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -122,7 +129,29 @@ impl Display for Operand {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
+    Nop,
     LoadK,
+    GetGlobal,
+    Call,
+    CallOpen,
+    CallFromTop,
+    TailCall,
+    Closure,
+    CloseUpvalues,
+    GetUpvalue,
+    SetUpvalue,
+    NewTable,
+    GetTable,
+    SetTable,
+    SelfCall,
+    SetList,
+    Not,
+    Len,
+    Pow,
+    Concat,
+    Eq,
+    Ne,
+    Lt,
     Move,
     Add,
     Sub,
@@ -130,12 +159,15 @@ pub enum Op {
     Div,
     Xor32,
     Jump,
+    JumpTable,
+    ForNext,
     Branch,
     BranchEq,
     BranchLt,
     BranchLe,
     Vararg,
     Return,
+    ReturnTop,
     Native,
     NativeBranch,
     NativeReturn,
@@ -144,7 +176,29 @@ pub enum Op {
 impl Op {
     pub fn parse(name: &str) -> Option<Self> {
         Some(match name {
+            "NOP" => Self::Nop,
             "LOADK" => Self::LoadK,
+            "GETGLOBAL" => Self::GetGlobal,
+            "CALL" => Self::Call,
+            "CALL_OPEN" => Self::CallOpen,
+            "CALL_FROM_TOP" => Self::CallFromTop,
+            "TAILCALL" => Self::TailCall,
+            "CLOSURE" => Self::Closure,
+            "CLOSEUPVALS" => Self::CloseUpvalues,
+            "GETUPVAL" => Self::GetUpvalue,
+            "SETUPVAL" => Self::SetUpvalue,
+            "NEWTABLE" => Self::NewTable,
+            "GETTABLE" => Self::GetTable,
+            "SETTABLE" => Self::SetTable,
+            "SELF" => Self::SelfCall,
+            "SETLIST" => Self::SetList,
+            "NOT" => Self::Not,
+            "LEN" => Self::Len,
+            "POW" => Self::Pow,
+            "CONCAT" => Self::Concat,
+            "EQ" => Self::Eq,
+            "NE" => Self::Ne,
+            "LT" => Self::Lt,
             "MOVE" => Self::Move,
             "ADD" => Self::Add,
             "SUB" => Self::Sub,
@@ -152,12 +206,15 @@ impl Op {
             "DIV" => Self::Div,
             "XOR32" => Self::Xor32,
             "JUMP" => Self::Jump,
+            "JUMP_TABLE" => Self::JumpTable,
+            "FOR_NEXT" => Self::ForNext,
             "BR_TRUE" => Self::Branch,
             "BR_EQ" => Self::BranchEq,
             "BR_LT" => Self::BranchLt,
             "BR_LE" => Self::BranchLe,
             "VARARG" => Self::Vararg,
             "RETURN" => Self::Return,
+            "RETURN_TOP" => Self::ReturnTop,
             "NATIVE" => Self::Native,
             "NATIVE_BRANCH" => Self::NativeBranch,
             "NATIVE_RETURN" => Self::NativeReturn,
@@ -167,7 +224,29 @@ impl Op {
 
     pub fn name(self) -> &'static str {
         match self {
+            Self::Nop => "NOP",
             Self::LoadK => "LOADK",
+            Self::GetGlobal => "GETGLOBAL",
+            Self::Call => "CALL",
+            Self::CallOpen => "CALL_OPEN",
+            Self::CallFromTop => "CALL_FROM_TOP",
+            Self::TailCall => "TAILCALL",
+            Self::Closure => "CLOSURE",
+            Self::CloseUpvalues => "CLOSEUPVALS",
+            Self::GetUpvalue => "GETUPVAL",
+            Self::SetUpvalue => "SETUPVAL",
+            Self::NewTable => "NEWTABLE",
+            Self::GetTable => "GETTABLE",
+            Self::SetTable => "SETTABLE",
+            Self::SelfCall => "SELF",
+            Self::SetList => "SETLIST",
+            Self::Not => "NOT",
+            Self::Len => "LEN",
+            Self::Pow => "POW",
+            Self::Concat => "CONCAT",
+            Self::Eq => "EQ",
+            Self::Ne => "NE",
+            Self::Lt => "LT",
             Self::Move => "MOVE",
             Self::Add => "ADD",
             Self::Sub => "SUB",
@@ -175,12 +254,15 @@ impl Op {
             Self::Div => "DIV",
             Self::Xor32 => "XOR32",
             Self::Jump => "JUMP",
+            Self::JumpTable => "JUMP_TABLE",
+            Self::ForNext => "FOR_NEXT",
             Self::Branch => "BR_TRUE",
             Self::BranchEq => "BR_EQ",
             Self::BranchLt => "BR_LT",
             Self::BranchLe => "BR_LE",
             Self::Vararg => "VARARG",
             Self::Return => "RETURN",
+            Self::ReturnTop => "RETURN_TOP",
             Self::Native => "NATIVE",
             Self::NativeBranch => "NATIVE_BRANCH",
             Self::NativeReturn => "NATIVE_RETURN",
@@ -190,13 +272,35 @@ impl Op {
     fn signature(self) -> &'static [Type] {
         use Type::{Block, Const, Reg};
         match self {
-            Self::LoadK => &[Reg, Const],
-            Self::Move => &[Reg, Reg],
-            Self::Add | Self::Sub | Self::Mul | Self::Div | Self::Xor32 => &[Reg, Reg, Reg],
+            Self::Nop => &[],
+            Self::LoadK | Self::GetGlobal | Self::GetUpvalue | Self::SetUpvalue => &[Reg, Const],
+            Self::CloseUpvalues | Self::CallFromTop | Self::ReturnTop => &[Reg],
+            Self::Move | Self::Not | Self::Len => &[Reg, Reg],
+            Self::SelfCall => &[Reg, Reg, Reg, Reg],
+            Self::Add
+            | Self::Sub
+            | Self::Mul
+            | Self::Div
+            | Self::Xor32
+            | Self::GetTable
+            | Self::SetTable
+            | Self::Pow
+            | Self::Concat
+            | Self::Eq
+            | Self::Ne
+            | Self::Lt => &[Reg, Reg, Reg],
             Self::Jump => &[Block],
+            Self::ForNext => &[Reg, Reg, Const, Block, Block],
             Self::Branch => &[Reg, Block, Block],
             Self::BranchEq | Self::BranchLt | Self::BranchLe => &[Reg, Reg, Block, Block],
-            Self::Vararg
+            Self::Call
+            | Self::CallOpen
+            | Self::NewTable
+            | Self::TailCall
+            | Self::SetList
+            | Self::JumpTable
+            | Self::Closure
+            | Self::Vararg
             | Self::Return
             | Self::Native
             | Self::NativeBranch
@@ -205,7 +309,35 @@ impl Op {
     }
 
     pub fn types(self, count: usize) -> Result<Vec<Type>, String> {
-        if matches!(self, Self::Return | Self::Vararg) {
+        if matches!(self, Self::Call | Self::Closure | Self::SetList) {
+            if count < 2 {
+                return Err(format!(
+                    "{} needs a register and a constant operand",
+                    self.name()
+                ));
+            }
+            let mut types = vec![Type::Reg; count];
+            types[1] = Type::Const;
+            if self == Self::Closure {
+                types[2..].fill(Type::Capture);
+            }
+            return Ok(types);
+        }
+        if self == Self::JumpTable {
+            if count < 2 {
+                return Err("JUMP_TABLE needs a register and at least one target".into());
+            }
+            let mut types = vec![Type::Block; count];
+            types[0] = Type::Reg;
+            return Ok(types);
+        }
+        if matches!(self, Self::TailCall | Self::CallOpen | Self::NewTable) && count == 0 {
+            return Err(format!("{} needs a register", self.name()));
+        }
+        if matches!(
+            self,
+            Self::Return | Self::Vararg | Self::TailCall | Self::CallOpen | Self::NewTable
+        ) {
             return Ok(vec![Type::Reg; count]);
         }
         if self.native() {
@@ -235,11 +367,15 @@ impl Op {
         matches!(
             self,
             Self::Jump
+                | Self::JumpTable
+                | Self::ForNext
                 | Self::Branch
                 | Self::BranchEq
                 | Self::BranchLt
                 | Self::BranchLe
                 | Self::Return
+                | Self::ReturnTop
+                | Self::TailCall
                 | Self::NativeBranch
                 | Self::NativeReturn
         )
@@ -247,6 +383,10 @@ impl Op {
 
     pub(crate) fn native(self) -> bool {
         matches!(self, Self::Native | Self::NativeBranch | Self::NativeReturn)
+    }
+
+    pub(crate) fn uses_result_top(self) -> bool {
+        matches!(self, Self::CallOpen | Self::CallFromTop | Self::ReturnTop)
     }
 }
 
@@ -259,7 +399,7 @@ pub struct Inst {
 impl Inst {
     pub fn new(op: Op, args: Vec<Operand>) -> Result<Self, String> {
         for (index, (expected, arg)) in op.types(args.len())?.into_iter().zip(&args).enumerate() {
-            if expected != arg.ty() {
+            if !expected.accepts(arg.ty()) {
                 return Err(format!(
                     "{} operand {} expects {expected:?}, got {}",
                     op.name(),
@@ -268,11 +408,105 @@ impl Inst {
                 ));
             }
         }
-        Ok(Self { op, args })
+        if op == Op::GetGlobal && !matches!(args[1], Operand::Const(Const::String(_))) {
+            return Err("GETGLOBAL needs a byte string name".into());
+        }
+        if op == Op::SelfCall && args[0] == args[1] {
+            return Err("SELF needs distinct method and receiver destinations".into());
+        }
+        if op == Op::ForNext && !matches!(args[2], Operand::Const(Const::Bool(_))) {
+            return Err("FOR_NEXT needs a boolean step direction flag".into());
+        }
+        if op == Op::SetList
+            && !matches!(args[1], Operand::Const(Const::Number(first))
+            if first.fract() == 0.0 && first >= 0.0
+                && first <= (1u64 << 53).saturating_sub(args.len().saturating_sub(3) as u64) as f64)
+        {
+            return Err(
+                "SETLIST needs an exact nonnegative starting key and exact subsequent keys".into(),
+            );
+        }
+        if op == Op::Closure
+            && !matches!(&args[1], Operand::Const(Const::String(name))
+                if !name.is_empty() && std::str::from_utf8(name).is_ok())
+        {
+            return Err("CLOSURE needs a UTF-8 prototype name".into());
+        }
+        if op == Op::Closure
+            && args[2..]
+                .iter()
+                .any(|arg| !matches!(arg, Operand::Reg(_)) && inherited_capture(arg).is_none())
+        {
+            return Err(
+                "CLOSURE captures must be registers or upvalue slots from 0 through 254".into(),
+            );
+        }
+        if matches!(op, Op::GetUpvalue | Op::SetUpvalue)
+            && !matches!(args[1], Operand::Const(Const::Number(slot))
+                if (0.0..=254.0).contains(&slot) && slot.fract() == 0.0)
+        {
+            return Err("upvalue slot must be an integer from 0 through 254".into());
+        }
+        if op == Op::Call
+            && !matches!(args[1], Operand::Const(Const::Number(count))
+            if count.fract() == 0.0 && count >= 0.0 && count <= (args.len() - 2) as f64)
+        {
+            return Err(
+                "CALL result count must be a nonnegative integer with one register per result"
+                    .into(),
+            );
+        }
+        let instruction = Self { op, args };
+        if op == Op::Call {
+            let (_, results, _) = instruction.call_parts();
+            let unique: BTreeSet<_> = results.iter().filter_map(operand_register).collect();
+            if unique.len() != results.len() {
+                return Err("CALL result registers must be distinct".into());
+            }
+        }
+        Ok(instruction)
+    }
+
+    pub(crate) fn call_parts(&self) -> (Reg, &[Operand], &[Operand]) {
+        let (Operand::Reg(function), Operand::Const(Const::Number(count))) =
+            (&self.args[0], &self.args[1])
+        else {
+            unreachable!("validated CALL operands");
+        };
+        let (results, args) = self.args[2..].split_at(*count as usize);
+        (*function, results, args)
+    }
+
+    pub(crate) fn closure_target(&self) -> &str {
+        let Operand::Const(Const::String(name)) = &self.args[1] else {
+            unreachable!("validated prototype name")
+        };
+        std::str::from_utf8(name).unwrap()
+    }
+
+    pub(crate) fn upvalue_slot(&self) -> usize {
+        let Operand::Const(Const::Number(slot)) = self.args[1] else {
+            unreachable!("validated upvalue slot")
+        };
+        slot as usize
     }
 
     fn destination(&self) -> Option<Reg> {
-        if self.op.terminates() || self.op.native() || self.op == Op::Vararg {
+        if self.op.terminates()
+            || self.op.native()
+            || matches!(
+                self.op,
+                Op::Nop
+                    | Op::CloseUpvalues
+                    | Op::Call
+                    | Op::CallOpen
+                    | Op::Vararg
+                    | Op::SetUpvalue
+                    | Op::SetTable
+                    | Op::SetList
+                    | Op::SelfCall
+            )
+        {
             return None;
         }
         let Operand::Reg(reg) = self.args[0] else {
@@ -312,7 +546,20 @@ impl Inst {
             }
             return;
         }
-        if self.op.native() || (self.comparison().is_some() && self.condition(facts).is_none()) {
+        if self.op.native()
+            || self.op.uses_result_top()
+            || matches!(
+                self.op,
+                Op::Call
+                    | Op::SetUpvalue
+                    | Op::SetTable
+                    | Op::SetList
+                    | Op::SelfCall
+                    | Op::JumpTable
+                    | Op::ForNext
+            )
+            || (self.comparison().is_some() && self.condition(facts).is_none())
+        {
             facts.clear();
             return;
         }
@@ -353,7 +600,9 @@ impl Inst {
             Op::Branch => &self.args[1..],
             Op::BranchEq | Op::BranchLt | Op::BranchLe => &self.args[2..],
             Op::Jump => return &self.args,
-            Op::Return | Op::NativeReturn => return &[],
+            Op::JumpTable => return &self.args[1..],
+            Op::ForNext => return &self.args[3..],
+            Op::Return | Op::ReturnTop | Op::TailCall | Op::NativeReturn => return &[],
             Op::NativeBranch => return &self.args[self.args.len() - 2..],
             _ => unreachable!("successors require a terminator"),
         };
@@ -382,11 +631,13 @@ impl Display for Inst {
     }
 }
 
+#[derive(Clone)]
 pub struct Block {
     pub name: String,
     pub instructions: Vec<Inst>,
 }
 
+#[derive(Clone)]
 pub struct Proto {
     pub name: String,
     pub params: u8,
@@ -446,6 +697,25 @@ impl Proto {
 
     pub fn verify(&self) -> Result<(), String> {
         self.block_indices().map(|_| ())
+    }
+
+    pub fn control_flow(&self) -> Result<Vec<Vec<usize>>, String> {
+        let names = self.block_indices()?;
+        let unknown = Facts::new();
+        Ok(self
+            .blocks
+            .iter()
+            .map(|block| {
+                block
+                    .instructions
+                    .last()
+                    .unwrap()
+                    .successors(&unknown)
+                    .iter()
+                    .map(|target| names[target.block()])
+                    .collect()
+            })
+            .collect())
     }
 
     pub fn facts(&self) -> Result<Vec<Vec<Option<Facts>>>, String> {
@@ -584,7 +854,7 @@ impl Proto {
         self.verify()?;
         // a native closure can make later writes visible through an escaped register cell.
         if self.blocks.iter().flat_map(|block| &block.instructions).any(|inst| {
-            inst.op.native() && matches!(&inst.args[0], Operand::Const(Const::String(name))
+            inst.op == Op::Closure || inst.op.uses_result_top() || inst.op.native() && matches!(&inst.args[0], Operand::Const(Const::String(name))
                 if name.ends_with(b".CLOSURE") || name.ends_with(b".NEWCLOSURE") || name.ends_with(b".DUPCLOSURE"))
         }) { return Ok(()); }
         let registers: BTreeSet<_> = self
@@ -632,6 +902,13 @@ impl Proto {
                             for reg in inst.args.iter().filter_map(operand_register) {
                                 live.remove(&reg);
                             }
+                        } else if inst.op == Op::Call {
+                            let (function, results, args) = inst.call_parts();
+                            for result in results.iter().filter_map(operand_register) {
+                                live.remove(&result);
+                            }
+                            live.insert(function);
+                            live.extend(args.iter().filter_map(operand_register));
                         } else if inst.op.native() {
                             live.extend(&registers);
                         } else {
@@ -668,6 +945,13 @@ fn operand_register(operand: &Operand) -> Option<Reg> {
         Operand::Reg(reg) => Some(*reg),
         _ => None,
     }
+}
+
+pub(crate) fn inherited_capture(operand: &Operand) -> Option<usize> {
+    let Operand::Const(Const::Number(index)) = operand else {
+        return None;
+    };
+    ((0.0..=254.0).contains(index) && index.fract() == 0.0).then_some(*index as usize)
 }
 
 // distinguish signed zeros at joins because subsequent division can observe the sign.

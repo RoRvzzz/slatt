@@ -2,7 +2,11 @@ const vscode = require('vscode');
 const { checkRules } = require('./check');
 
 const opcodes = [
-  'LOADK', 'MOVE', 'ADD', 'SUB', 'MUL', 'DIV', 'XOR32', 'JUMP', 'BR_TRUE',
+  'LOADK', 'MOVE', 'GETGLOBAL', 'CALL', 'CLOSURE', 'CLOSEUPVALS', 'GETUPVAL', 'SETUPVAL',
+  'NEWTABLE', 'GETTABLE', 'SETTABLE', 'NOT', 'LEN', 'POW', 'CONCAT', 'EQ', 'NE', 'LT',
+  'NOP', 'SELF', 'SETLIST', 'TAILCALL', 'JUMP_TABLE', 'FOR_NEXT',
+  'CALL_OPEN', 'CALL_FROM_TOP', 'RETURN_TOP',
+  'ADD', 'SUB', 'MUL', 'DIV', 'XOR32', 'JUMP', 'BR_TRUE',
   'BR_EQ', 'BR_LT', 'BR_LE', 'VARARG', 'RETURN', 'NATIVE', 'NATIVE_BRANCH', 'NATIVE_RETURN',
 ];
 

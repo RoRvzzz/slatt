@@ -1,0 +1,130 @@
+frontend
+fn matches_at(at, pattern) {
+    if at < 0 || at + pattern.len > this.len { return false; }
+    for i in 0..pattern.len {
+        if this[at+i] != pattern[i] { return false; }
+    }
+    true
+}
+fn require_tokens(at, pattern) {
+    if !this.matches_at(at,pattern) { throw "unsupported WeAreDevs token at " + at.to_string(); }
+    at + pattern.len
+}
+fn seek(at, pattern) {
+    at = this.index_of(pattern[0],at);
+    while at >= 0 && at + pattern.len <= this.len {
+        if this.matches_at(at,pattern) { return at; }
+        at = this.index_of(pattern[0],at+1);
+    }
+    throw "required WeAreDevs handler missing";
+}
+
+fn decimal_value(token) {
+    let data = bytes(token);
+    if data.len == 0 || data.len > 16 { throw "unsupported WeAreDevs integer literal"; }
+    let value = 0;
+    for i in 0..data.len {
+        let digit = data[i] - 48;
+        if digit < 0 || digit > 9 { throw "expected WeAreDevs integer token"; }
+        value = value*10 + digit;
+    }
+    if value > 9007199254740991 { throw "integer exceeds exact Lua range"; }
+    value
+}
+fn starts_integer(at) {
+    while at < this.len && ["(","-","+"].contains(this[at]) { at += 1; }
+    if at >= this.len { return false; }
+    let raw = bytes(this[at]);
+    raw.len > 0 && raw[0] >= 48 && raw[0] <= 57
+}
+fn integer_atom(at) {
+    let token = this[at];
+    if token == "-" || token == "+" {
+        let next = this.integer_atom(at+1);
+        return [if token == "-" { -next[0] } else { next[0] }, next[1]];
+    }
+    if token == "(" {
+        let next = this.integer_expr(at+1);
+        return [next[0], this.require_tokens(next[1],[")"])];
+    }
+    [decimal_value(token), at+1]
+}
+fn integer_term(at) {
+    let next = this.integer_atom(at);
+    let value = next[0];
+    at = next[1];
+    while at < this.len && (this[at] == "%" || this[at] == "*") && this.starts_integer(at+1) {
+        let op = this[at];
+        next = this.integer_atom(at+1);
+        if op == "%" {
+            if next[0] <= 0 { throw "unsupported modulus"; }
+            value = ((value % next[0]) + next[0]) % next[0];
+        } else {
+            if next[0] != 0 && abs(value) > 9007199254740991 / abs(next[0]) { throw "inexact Lua multiply"; }
+            value *= next[0];
+        }
+        at = next[1];
+    }
+    [value, at]
+}
+fn integer_expr(at) {
+    let next = this.integer_term(at);
+    let value = next[0];
+    at = next[1];
+    while at < this.len && (this[at] == "+" || this[at] == "-") && this.starts_integer(at+1) {
+        let op = this[at];
+        next = this.integer_term(at+1);
+        if op == "+" { value += next[0]; } else { value -= next[0]; }
+        if abs(value) > 9007199254740991 { throw "inexact Lua integer arithmetic"; }
+        at = next[1];
+    }
+    [value, at]
+}
+
+fn literal_bytes(token) {
+    let raw = bytes(token);
+    if raw.len < 2 || ![34,39].contains(raw[0]) || raw[raw.len-1] != raw[0] {
+        throw "expected quoted WeAreDevs literal";
+    }
+    let output = [];
+    let at = 1;
+    while at < raw.len - 1 {
+        let byte = raw[at];
+        at += 1;
+        if byte != 92 { output.push(byte); continue; }
+        if at >= raw.len - 1 { throw "truncated WeAreDevs literal escape"; }
+        let next = raw[at];
+        if next >= 48 && next <= 57 {
+            let start = at;
+            let value = 0;
+            while at < raw.len-1 && at < start+3 && raw[at] >= 48 && raw[at] <= 57 {
+                value = value*10 + raw[at]-48;
+                at += 1;
+            }
+            if value > 255 { throw "WeAreDevs literal byte out of range"; }
+            output.push(value);
+        } else {
+            let escapes = #{n:10,r:13,t:9};
+            let mapped = escapes[byte_char(next).to_string()];
+            if mapped != () { output.push(mapped); }
+            else if [34,39,92].contains(next) { output.push(next); }
+            else { throw "unsupported WeAreDevs literal escape"; }
+            at += 1;
+        }
+    }
+    output
+}
+fn lua_quote(value) {
+    let result = "\"";
+    for byte in value {
+        if byte >= 32 && byte <= 126 && byte != 34 && byte != 92 {
+            result += byte_char(byte);
+        } else if byte == 34 || byte == 92 {
+            result += "\\" + byte_char(byte);
+        } else {
+            result += "\\" + (byte/100).to_string() + (byte/10%10).to_string() + (byte%10).to_string();
+        }
+    }
+    result + "\""
+}
+%%

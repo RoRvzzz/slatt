@@ -1,0 +1,56 @@
+frontend
+fn label(id) { "b" + id.to_string() }
+
+fn decode_instruction() {
+    let opcode = this.read_uint(1, false);
+    switch opcode {
+        0 => {
+            let target = pfir_reg(this.read_uint(1, false));
+            let size = this.read_uint(1, false);
+            pfir_inst("GETGLOBAL", [target, this.take(size)])
+        },
+        3 => {
+            let register = pfir_reg(this.read_uint(1, false));
+            let yes = pfir_target(label(this.read_uint(1, false)));
+            let no = pfir_target(label(this.read_uint(1, false)));
+            pfir_inst("BR_TRUE", [register, yes, no])
+        },
+        4 => pfir_inst("JUMP", [pfir_target(label(this.read_uint(1, false)))]),
+        5 => {
+            let callee = pfir_reg(this.read_uint(1, false));
+            let results = this.read_uint(1, false);
+            let arguments = this.read_uint(1, false);
+            let operands = [callee, results];
+            for value in 0..(results + arguments) { operands.push(pfir_reg(this.read_uint(1, false))); }
+            pfir_inst("CALL", operands)
+        },
+        6 => {
+            let count = this.read_uint(1, false);
+            let registers = [];
+            for value in 0..count { registers.push(pfir_reg(this.read_uint(1, false))); }
+            pfir_inst("RETURN", registers)
+        },
+        7 => {
+            let target = pfir_reg(this.read_uint(1, false));
+            let size = this.read_uint(1, false);
+            pfir_inst("LOADK", [target, this.take(size)])
+        },
+        _ => throw "unknown packed opcode " + opcode.to_string() + " at byte " + (this.offset - 1).to_string(),
+    }
+}
+
+fn lift_workflow(image) {
+    let cursor = byte_cursor(image);
+    if cursor.take(4).as_string() != "SLVM" { throw "unknown example wire format"; }
+    let count = cursor.read_uint(1, false);
+    let blocks = [];
+    for id in 0..count {
+        let instructions = [];
+        let width = cursor.read_uint(1, false);
+        for index in 0..width { instructions.push(cursor.decode_instruction()); }
+        blocks.push(pfir_block(label(id), instructions));
+    }
+    if cursor.remaining != 0 { throw "trailing bytes in packed example"; }
+    pfir_proto("packed_workflow", 0, false, blocks)
+}
+%%

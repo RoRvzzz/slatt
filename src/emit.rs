@@ -244,15 +244,18 @@ impl<'a> Encoder<'a> {
         Ok(1)
     }
 
-    fn load(&mut self, dest: u32, constant: &Const) -> Result<(), String> {
-        let index = self
-            .constants
+    fn constant_index(&mut self, constant: &Const) -> usize {
+        self.constants
             .iter()
             .position(|value| same_fact(value, constant))
             .unwrap_or_else(|| {
                 self.constants.push(constant.clone());
                 self.constants.len() - 1
-            });
+            })
+    }
+
+    fn load(&mut self, dest: u32, constant: &Const) -> Result<(), String> {
+        let index = self.constant_index(constant);
         match self.dialect {
             Dialect::Lua51 if index <= 0x3_ffff => {
                 self.words.push(1 | (dest << 6) | (index as u32) << 14)
@@ -271,6 +274,48 @@ impl<'a> Encoder<'a> {
 
     fn move_reg(&mut self, dst: u32, src: u32) {
         self.abc(self.dialect.opcode(0, 6), dst, src, 0);
+    }
+
+    fn get_global(&mut self, target: u32, name: &Const) -> Result<(), String> {
+        let index = self.constant_index(name);
+        match self.dialect {
+            Dialect::Lua51 if index <= 0x3_ffff => {
+                self.words.push(5 | (target << 6) | (index as u32) << 14)
+            }
+            Dialect::Luau => {
+                self.abc(7, target, 0, 0);
+                self.words.push(
+                    u32::try_from(index).map_err(|_| "global name index exceeds Luau range")?,
+                );
+            }
+            _ => return Err("global name index exceeds Lua 5.1 range".into()),
+        }
+        Ok(())
+    }
+
+    fn call(&mut self, instruction: &Inst) -> Result<(), String> {
+        let (Reg(function), results, args) = instruction.call_parts();
+        let argument_width = args.len() as u32 + 1;
+        let result_width = results.len() as u32 + 1;
+        let end = self.base + argument_width.max(result_width);
+        if end > self.dialect.max_frame() {
+            return Err(format!("call needs {end} target register slots"));
+        }
+        self.frame = self.frame.max(end);
+        self.move_reg(self.base, u32::from(function));
+        for (index, argument) in args.iter().enumerate() {
+            self.move_reg(self.base + 1 + index as u32, reg(argument));
+        }
+        self.abc(
+            self.dialect.opcode(28, 21),
+            self.base,
+            argument_width,
+            result_width,
+        );
+        for (index, result) in results.iter().enumerate() {
+            self.move_reg(reg(result), self.base + index as u32);
+        }
+        Ok(())
     }
 
     fn fixed_range(&mut self, inst: &Inst) -> Result<(), String> {
@@ -359,11 +404,46 @@ impl<'a> Encoder<'a> {
 
     fn lower(&mut self, inst: &'a Inst, facts: Option<&Facts>) -> Result<(), String> {
         match inst.op {
+            Op::Nop => {}
             Op::LoadK => {
                 let Operand::Const(constant) = &inst.args[1] else {
                     unreachable!("typed constant operand")
                 };
                 self.load(reg(&inst.args[0]), constant)?;
+            }
+            Op::GetGlobal => {
+                let Operand::Const(name) = &inst.args[1] else {
+                    unreachable!("typed global name")
+                };
+                self.get_global(reg(&inst.args[0]), name)?;
+            }
+            Op::Call => self.call(inst)?,
+            Op::Closure
+            | Op::CloseUpvalues
+            | Op::ForNext
+            | Op::CallOpen
+            | Op::CallFromTop
+            | Op::ReturnTop
+            | Op::TailCall
+            | Op::JumpTable
+            | Op::SelfCall
+            | Op::SetList
+            | Op::GetUpvalue
+            | Op::SetUpvalue
+            | Op::NewTable
+            | Op::GetTable
+            | Op::SetTable
+            | Op::Not
+            | Op::Len
+            | Op::Pow
+            | Op::Concat
+            | Op::Eq
+            | Op::Ne
+            | Op::Lt => {
+                return Err(format!(
+                    "{} currently requires Lua source emission",
+                    inst.op.name()
+                ));
             }
             Op::Move => self.move_reg(reg(&inst.args[0]), reg(&inst.args[1])),
             Op::Add | Op::Sub | Op::Mul | Op::Div => {

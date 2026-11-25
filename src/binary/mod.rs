@@ -4,6 +4,7 @@ mod luau;
 use crate::ir::{Block, Const, Inst, Op, Operand, Proto, Reg};
 use std::collections::BTreeSet;
 
+#[derive(Clone)]
 pub(crate) struct Lua51Origin {
     pub stack: u16,
     pub upvalues: u8,

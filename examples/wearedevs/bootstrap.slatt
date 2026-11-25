@@ -1,0 +1,177 @@
+include "constants.slatt";
+
+frontend
+fn bootstrap_reference(scopes, symbol, token) {
+    let scope = scopes.len-1;
+    while scope >= 0 {
+        let bindings = scopes[scope];
+        if bindings.contains(symbol) { return bindings[symbol] == token; }
+        if bindings.values().contains(token) { return false; }
+        scope -= 1;
+    }
+    false
+}
+
+fn bootstrap_match(at, pattern, aliases) {
+    let scopes = [aliases];
+    let declared = #{};
+    for item in pattern.split(" ") {
+        if item == "" { continue; }
+        let code = item[0];
+        if item == "~" { scopes.pop(); continue; }
+        if item == "_" { scopes.push(#{}); continue; }
+        if at >= this.len { throw "truncated WeAreDevs bootstrap"; }
+        let symbol = item.sub_string(1);
+        let token = this[at];
+        if code == '@' || (code == '^' && item != "^") {
+            let number = if code == '^' {
+                if token != "(" && !this.starts_integer(at) { throw "expected WeAreDevs numeric atom"; }
+                if token == "-" || token == "+" { throw "unguarded WeAreDevs numeric operand"; }
+                this.integer_atom(at)
+            } else { this.integer_expr(at) };
+            if number[0] != parse_int(symbol) { throw "changed WeAreDevs bootstrap constant"; }
+            at = number[1];
+            continue;
+        }
+        if code == '?' {
+            declared[symbol] = token;
+        } else if code == '&' && item != "&" {
+            let name = declared[symbol];
+            let scope = scopes.len-1;
+            if scopes[scope].values().contains(name) { throw "shadowed WeAreDevs bootstrap binding"; }
+            scopes[scope][symbol] = name;
+            continue;
+        } else if code == '$' {
+            if !bootstrap_reference(scopes,symbol,token) { throw "changed WeAreDevs bootstrap reference"; }
+        } else if code == '!' {
+            if literal_bytes(token) != bytes(symbol).to_array() { throw "changed WeAreDevs bootstrap literal"; }
+        } else if token != item {
+            throw "changed WeAreDevs bootstrap token";
+        }
+        at += 1;
+    }
+    at
+}
+
+fn rotation_end(at, close, pool) {
+    let pair = this[at+3];
+    if pool == pair || pool == this[at+1] || this[at+1] == pair {
+        throw "shadowed WeAreDevs pool reversal";
+    }
+    this.bootstrap_match(close,
+        "} ) do while $p [ @1 ] < $p [ @2 ] do $pool [ $p [ @1 ] ] , $pool [ $p [ @2 ] ] , " +
+        "$p [ @1 ] , $p [ @2 ] = $pool [ $p [ @2 ] ] , $pool [ $p [ @1 ] ] , " +
+        "$p [ @1 ] + @1 , $p [ @2 ] - @1 end end", #{p:pair,pool:pool})
+}
+
+fn base64_pattern(power) {
+    "local ?len = $len ( $record ) &len local ?buffer = { } &buffer " +
+    "local ?pos = @1 &pos local ?word = @0 &word local ?count = @0 &count " +
+    "while $pos <= $len do _ local ?byte = $sub ( $record , $pos , $pos ) &byte " +
+    "local ?digit = $base64 [ $byte ] &digit if $digit then _ " +
+    "$word = $word + $digit * " + power + " $count = $count + @1 " +
+    "if $count == @4 then _ $count = @0 local ?a = $floor ( $word / ^65536 ) &a " +
+    "local ?b = $floor ( ( $word % ^65536 ) / ^256 ) &b local ?c = $word % ^256 &c " +
+    "$insert ( $buffer , $char ( $a , $b , $c ) ) $word = @0 end ~ " +
+    "elseif ~ $byte == != then _ $insert ( $buffer , $char ( $floor ( $word / ^65536 ) ) ) " +
+    "if $pos >= $len or $sub ( $record , $pos + @1 , $pos + @1 ) ~= != then _ " +
+    "$insert ( $buffer , $char ( $floor ( ( $word % ^65536 ) / ^256 ) ) ) end ~ " +
+    "break end ~ $pos = $pos + @1 end ~ $pool [ $i ] = $concat ( $buffer ) "
+}
+
+fn base85_pattern() {
+    "local ?len = $len ( $record ) &len local ?buffer = { } &buffer local ?pos = @1 &pos " +
+    "while $pos <= $len do _ local ?left = ( $len - $pos ) + @1 &left " +
+    "local ?width = $left >= @5 and @5 or $left &width local ?word = @0 &word " +
+    "local ?valid = $width > @1 &valid for ?n = @0 , @4 , @1 do _ &n local ?digit &digit " +
+    "if $n < $width then _ local ?byte = $sub ( $record , $pos + $n , $pos + $n ) &byte " +
+    "$digit = $base85 [ $byte ] if not $digit then _ $valid = false break end ~ " +
+    "else ~ _ $digit = @84 end ~ $word = $word * ^85 + $digit end ~ " +
+    "if $valid then _ local ?a = $floor ( $word / ^16777216 ) % ^256 &a " +
+    "local ?b = $floor ( $word / ^65536 ) % ^256 &b local ?c = $floor ( $word / ^256 ) % ^256 &c " +
+    "local ?d = $word % ^256 &d if $width == @5 then _ $insert ( $buffer , $char ( $a , $b , $c , $d ) ) " +
+    "elseif ~ $width == @4 then _ $insert ( $buffer , $char ( $a , $b , $c ) ) " +
+    "elseif ~ $width == @3 then _ $insert ( $buffer , $char ( $a , $b ) ) " +
+    "elseif ~ $width == @2 then _ $insert ( $buffer , $char ( $a ) ) end ~ end ~ " +
+    "$pos = $pos + $width end ~ $pool [ $i ] = $concat ( $buffer ) "
+}
+
+fn certify_decoder(at, limit, pool) {
+    at = this.require_tokens(at,["do"]);
+    let aliases = #{};
+    let fields = #{"string.char":"char","string.sub":"sub","string.len":"len",
+                   "math.floor":"floor","table.insert":"insert","table.concat":"concat"};
+    while this[at] == "local" {
+        let name = this[at+1];
+        let rhs = this.require_tokens(at+2,["="]);
+        let key;
+        if aliases.values().contains(name) || ![1,2].contains(bytes(name).len) {
+            throw "ambiguous WeAreDevs bootstrap alias";
+        }
+        if this[rhs] == "{" {
+            let alphabet = this.read_alphabet(rhs+1);
+            if alphabet.base == 64 && alphabet.digits.contains("61") { throw "ambiguous base64 padding"; }
+            at = alphabet.end+1;
+            key = "base" + alphabet.base.to_string();
+        } else if this[rhs] == pool || this[rhs] == "type" {
+            if aliases.values().contains(this[rhs]) { throw "shadowed WeAreDevs alias source"; }
+            key = if this[rhs] == pool { "pool" } else { "type" };
+            at = rhs+1;
+        } else {
+            let path = this[rhs] + this[rhs+1] + this[rhs+2];
+            if !fields.contains(path) { throw "unsupported WeAreDevs builtin alias"; }
+            key = fields[path];
+            at = rhs+3;
+        }
+        if aliases.contains(key) { throw "duplicate WeAreDevs bootstrap alias"; }
+        aliases[key] = name;
+        at = this.separators(at);
+    }
+    let prefix =
+        "for ?i = @1 , # $pool , @1 do _ &i local ?record = $pool [ $i ] &record " +
+        "if $type ( $record ) == !string then _ ";
+    let suffix = "end ~ end ~ end";
+    let end;
+    if aliases.keys().len == 9 && aliases.contains("base64") {
+        end = this.bootstrap_match(at,prefix + base64_pattern("^64 ^ ( @3 - $count )") + suffix,aliases);
+    } else if aliases.keys().len == 10 && aliases.contains("base64") && aliases.contains("base85") {
+        prefix += "local ?tag = $sub ( $record , @1 , @1 ) &tag if $tag == ?first then _ ";
+        let strip = "$record = $sub ( $record , @2 ) ";
+        let middle = "elseif ~ $tag == ?second then _ ";
+        let b64 = strip + base64_pattern("( ^64 ^ ( ( @3 - $count ) ) )");
+        let b85 = strip + base85_pattern();
+        let finish = "end ~ " + suffix;
+        try { end = this.bootstrap_match(at,prefix + b64 + middle + b85 + finish,aliases); }
+        catch { end = this.bootstrap_match(at,prefix + b85 + middle + b64 + finish,aliases); }
+    } else { throw "unsupported WeAreDevs codec setup"; }
+    if this.separators(end) != limit { throw "unexpected WeAreDevs bootstrap suffix"; }
+}
+
+fn materialize_pool(bootstrap_end) {
+    let data = this.read_pool();
+    let layout = data[4];
+    if !(layout.alphabets == 1 && layout.markers == 0 && data[3].len == 0) &&
+       !(layout.alphabets == 2 && layout.markers == 2 && data[3].len == 2) {
+        throw "unsupported WeAreDevs pool certification";
+    }
+    let pool = layout.table;
+    let reversal = 0;
+    let at = this.separators(data[2][1]+1);
+    if this[at] == "for" {
+        at = this.separators(this.rotation_end(at,layout.reversals[reversal][1],pool));
+        reversal += 1;
+    }
+    let getter = at;
+    at = this.require_tokens(at,["local","function",data[4].getter,"("]);
+    let parameter = this[at];
+    if parameter == pool || data[4].getter == pool { throw "shadowed WeAreDevs getter"; }
+    at = this.require_tokens(at+1,[")","return",pool,"[",parameter]);
+    let getter_end = this.separators(this.require_tokens(this.seek(at,["]"]),["]","end"]));
+    at = getter_end;
+    if this[at] == "for" { at = this.separators(this.rotation_end(at,layout.reversals[reversal][1],pool)); }
+    this.certify_decoder(at,bootstrap_end,pool);
+    let output = this.token_text(0,data[2][0]);
+    for value in data[0] { output += lua_quote(value) + ", "; }
+    output + "} " + this.token_text(getter,getter_end)
+}
+%%

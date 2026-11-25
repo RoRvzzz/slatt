@@ -37,7 +37,7 @@ impl Term {
     fn check(&self, types: &BTreeMap<&str, Type>) -> Result<(), String> {
         if let Self::Bound(name) = self {
             match types.get(name.as_str()) {
-                Some(Type::Reg | Type::Const) => {}
+                Some(Type::Reg | Type::Const | Type::Capture) => {}
                 Some(Type::Block) => return Err(format!("${name} is a block, not a value")),
                 None => return Err(format!("unknown binding ${name}")),
             }
@@ -106,7 +106,10 @@ impl Rule {
                                 types.get(name.as_str()).copied()
                             };
                             match existing {
-                                Some(ty) if ty == required => {}
+                                Some(ty) if required.accepts(ty) => {}
+                                Some(ty) if declares && ty.accepts(required) => {
+                                    types.insert(name.as_str(), required);
+                                }
                                 Some(ty) => {
                                     return Err(format!(
                                         "${name} has type {ty:?}, expected {required:?}"
@@ -115,7 +118,7 @@ impl Rule {
                                 None => return Err(format!("unknown binding ${name}")),
                             }
                         }
-                        PatternArg::Literal(value) if value.ty() != required => {
+                        PatternArg::Literal(value) if !required.accepts(value.ty()) => {
                             return Err(format!(
                                 "{} expects {required:?}, got {value}",
                                 inst.op.name()
@@ -159,19 +162,19 @@ impl Rule {
         Some(bindings)
     }
 
-    fn render(arm: &Arm, bindings: &Bindings) -> Vec<Inst> {
+    fn render(arm: &Arm, bindings: &Bindings) -> Result<Vec<Inst>, String> {
         arm.replacement
             .iter()
-            .map(|inst| Inst {
-                op: inst.op,
-                args: inst
+            .map(|inst| {
+                let args = inst
                     .args
                     .iter()
                     .map(|arg| match arg {
                         PatternArg::Literal(value) => value.clone(),
                         PatternArg::Bind(name) => bindings[name.as_str()].clone(),
                     })
-                    .collect(),
+                    .collect();
+                Inst::new(inst.op, args)
             })
             .collect()
     }
@@ -201,7 +204,7 @@ impl Rule {
                     start += 1;
                     continue;
                 };
-                let replacement = Self::render(arm, &bindings);
+                let replacement = Self::render(arm, &bindings)?;
                 let inserted = replacement.len();
                 let end = start + self.pattern.len();
                 proto.blocks[block]
@@ -273,11 +276,14 @@ impl Mapping {
         for (arg, required) in self.args.iter().zip(self.op.types(self.args.len())?) {
             match arg {
                 MapArg::Slot(index) => {
-                    if *types.entry(*index).or_insert(required) != required {
+                    let previous = types.entry(*index).or_insert(required);
+                    if previous.accepts(required) {
+                        *previous = required;
+                    } else if !required.accepts(*previous) {
                         return Err(format!("raw operand ${index} has conflicting types"));
                     }
                 }
-                MapArg::Literal(value) if value.ty() != required => {
+                MapArg::Literal(value) if !required.accepts(value.ty()) => {
                     return Err(format!(
                         "{} expects {required:?}, got {value}",
                         self.op.name()

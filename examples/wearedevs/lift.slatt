@@ -1,0 +1,75 @@
+include "constants.slatt";
+
+frontend
+fn find_emit_site() {
+    let next = this.seek(0,["C","=","c","(","C",")","m","="]);
+    let site = next - 1;
+    while site >= 0 && !this.matches_at(site,["y","=","S","("]) { site -= 1; }
+    if site < 0 { throw "WeAreDevs print lookup missing"; }
+    let callee = this.integer_expr(site+4);
+    if this.require_tokens(callee[1],[")"]) != next { throw "unsupported WeAreDevs call block"; }
+    let seed_begin = next + 8;
+    let seed = this.integer_expr(seed_begin);
+    let literal = this.integer_expr(this.require_tokens(seed[1],
+                               ["i","=","U","[","y","]","A","=","c","(","A",")","R","=","S","("]));
+    this.require_tokens(literal[1],[")","C","=","h","(","R",",","m",")","g","=","s","[","C","]",
+                                      "y","=","i","(","g",")"]);
+    [callee[0], literal[0], seed[0], [seed_begin,seed[1]]]
+}
+
+fn lift_literal(cipher, seed) {
+    // Semantics of the literal handler under the audited VM template.
+    let modulus = 35184372088832;
+    if seed < 0 || seed >= modulus { throw "unsupported WeAreDevs literal seed"; }
+    let state = seed % 255 + 2;
+    let feedback = 204;
+    let available = 0;
+    let word = 0;
+    let decoded = [];
+    for encrypted in cipher {
+        if available == 0 {
+            seed = (seed * 213 + 27552854471197) % modulus;
+            state = state * 201 % 257;
+            while state == 1 { state = state * 201 % 257; }
+            let shift = state % 32;
+            let value = (seed >> (13 - state/32)) & 4294967295;
+            word = ((value >> shift) | (value << (32-shift))) & 4294967295;
+            available = 4;
+        }
+        available -= 1;
+        feedback = (encrypted + ((word >> (available*8)) & 255) + feedback) % 256;
+        decoded.push(feedback);
+    }
+    decoded
+}
+
+fn lift_program() {
+    let site = this.find_emit_site();
+    let data = this.read_pool();
+    let constants = data[0];
+    site[0] += data[1];
+    site[1] += data[1];
+    if site[0] < 1 || site[0] > constants.len || site[1] < 1 || site[1] > constants.len ||
+       lua_quote(constants[site[0]-1]) != "\"print\"" {
+        throw "unsupported WeAreDevs payload operands";
+    }
+    // shortcut: new VM layouts need their own instruction semantics and control-flow proof.
+    let template = "";
+    let omitted = [data[2], data[3], site[3]];
+    for i in 0..this.len {
+        if omitted.some(|range| i >= range[0] && i < range[1]) { continue; }
+        template += this[i] + " ";
+    }
+    let guard = blob();
+    for i in 0..constants.len {
+        if i == site[1]-1 { continue; }
+        let n = constants[i].len;
+        for j in 0..4 { guard.push((n >> (8*j)) & 255); }
+        for byte in constants[i] { guard.push(byte); }
+    }
+    if sha256(template) != "4e6983a86dbed17f83d2fef90570c77349f930d8ae7f19aa0f7703fc0ec01dd2" || sha256(guard) != "24c63cf56e1b15499ca69977de1bd246ace86266e884cca0381ac724a57329fb" {
+        throw "unsupported WeAreDevs VM layout or guard constants";
+    }
+    "print(" + lua_quote(lift_literal(constants[site[1]-1],site[2])) + ")\n"
+}
+%%

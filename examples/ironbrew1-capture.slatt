@@ -1,0 +1,15 @@
+frontend
+let packed = ();
+for literal in lua_long_strings(source) {
+    if literal.text.len < 32 { continue; }
+    let encoded = bytes(literal.text);
+    try { encoded.decode_ascii85(); } catch { continue; }
+    if packed != () { throw "more than one Ascii85 literal"; }
+    packed = literal;
+}
+if packed == () { throw "no Ascii85 literal"; }
+let tree = lua_ast(source);
+let invocation = tree.enclosing("function_call", packed.begin, packed.end);
+let fixture = "local env=getfenv(); rawset(env,'math',math); rawset(env,'string',string); rawset(env,'table',table); return {}";
+luau_capture_expr(source, invocation.begin, invocation.end, fixture, "image", 10000)
+%%

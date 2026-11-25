@@ -1,0 +1,291 @@
+include "ironbrew1-format.slatt";
+
+frontend
+fn recipe(text, opcode, args, mode) { [lua_token_buffer(text), opcode, args, mode] }
+
+fn binary_recipe(symbol, opcode, swap) {
+    let args = if swap { ["a", "c", "b"] } else { ["a", "b", "c"] };
+    recipe("b[h[__match_a]]=b[h[__match_b]]"+symbol+"b[h[__match_c]]", opcode, args, 0)
+}
+
+fn recipes() {
+    let rows = [
+        recipe("b[h[__match_a]]=b[h[__match_b]]", "MOVE", ["a","b"], 0),
+        recipe("b[h[__match_a]]=nil", "LOADK", ["a",()], 0),
+        recipe("b[h[__match_a]]=m[h[__match_b]]", "LOADK", ["a","constant_b"], 0),
+        recipe("b[h[__match_a]]=f[m[h[__match_b]]]", "GETGLOBAL", ["a","constant_b"], 0),
+        recipe("b[h[__match_a]]={}", "NEWTABLE", ["a"], 0),
+        recipe("b[h[__match_a]]=b[h[__match_b]][b[h[__match_c]]]", "GETTABLE", ["a","b","c"], 0),
+        recipe("b[h[__match_a]][b[h[__match_b]]]=b[h[__match_c]]", "SETTABLE", ["a","b","c"], 0),
+        recipe("local __match_r,__match_d=b[h[__match_b]],h[__match_a];do local __match_r,__match_m=__match_r,__match_r[b[h[__match_c]]] b[__match_d+1]=__match_r b[__match_d]=__match_m end",
+               "SELF", ["a","a_plus_1","b","c"], 0),
+        recipe("local __match_v,__match_start=h[__match_a],(h[__match_c]*100) local __match_t=b[__match_v] for __match_i=1,h[__match_b] do __match_t[__match_start+__match_i]=b[__match_v+__match_i] end",
+               "SETLIST", ["a","list_first","range_b"], 0),
+        recipe("b[h[__match_a]]=not b[h[__match_b]]", "NOT", ["a","b"], 0),
+        recipe("b[h[__match_a]]=#b[h[__match_b]]", "LEN", ["a","b"], 0),
+        recipe("local __match_v=d[h[__match_b]];b[h[__match_a]]=__match_v[1][__match_v[2]]", "GETUPVAL", ["a","b"], 0),
+        recipe("local __match_v=d[h[__match_b]];__match_v[1][__match_v[2]]=b[h[__match_a]]", "SETUPVAL", ["a","b"], 0),
+        recipe("u=h[__match_b]", "JUMP", ["target_b"], 0),
+        recipe("u=b[h[__match_a]]", "JUMP_TABLE", ["a"], 0),
+        recipe("if b[h[__match_a]] then u=h[__match_b];end", "BR_TRUE", ["a","target_b","next"], 0),
+        recipe("if not b[h[__match_a]] then u=h[__match_b];end", "BR_TRUE", ["a","next","target_b"], 0),
+        recipe("do return b[h[__match_a]];end", "RETURN", ["a"], 0),
+        recipe("do return end", "RETURN", [], 0),
+        recipe("do local __match_v=h[__match_a];return b[__match_v](b[__match_v+1]);end", "TAILCALL", ["a","a_plus_1"], 0),
+        recipe("do local __match_v,__match_o=h[__match_a],h[__match_c];return b[__match_v](b[__match_v+1],b[__match_o]);end",
+               "TAILCALL", ["a","a_plus_1","c"], 0),
+        recipe("local __match_v=h[__match_a];b[__match_v](b[__match_v+1])", "CALL", ["a",0,"a_plus_1"], 0),
+        recipe("local __match_v=h[__match_a];b[__match_v]=b[__match_v](b[__match_v+1])", "CALL", ["a",1,"a","a_plus_1"], 0),
+        recipe("local __match_v=h[__match_a];b[__match_v]=b[__match_v](b[__match_v+1],b[__match_v+2])", "CALL", ["a",1,"a","a_plus_1","a_plus_2"], 0),
+        recipe("local __match_v=h[__match_a];b[__match_v]=b[__match_v]()", "CALL", ["a",1,"a"], 0),
+        recipe("local __match_v=h[__match_a] local __match_end=__match_v+h[__match_b]-1;b[__match_v](j(b,__match_v+1,__match_end))",
+               "CALL", ["a",0,"range_b_minus_1"], 0),
+        recipe("local __match_v=h[__match_a];local __match_end=__match_v+h[__match_b];b[__match_v]=b[__match_v](j(b,__match_v+1,__match_end))",
+               "CALL", ["a",1,"a","range_b"], 0),
+        recipe("local __match_n=#h[__match_a];for __match_i=1,__match_n do b[h[__match_a][__match_i]]=m[h[__match_b][__match_i]];end",
+               "LOADK", ["a","constant_b"], 2),
+        recipe("local __match_n=#h[__match_a];for __match_i=1,__match_n do b[h[__match_a][__match_i]]=b[h[__match_b][__match_i]];end",
+               "MOVE", ["a","b"], 2),
+        recipe("local __match_n=#h[__match_a];for __match_i=1,__match_n do b[h[__match_a][__match_i]]=nil;end",
+               "LOADK", ["a",()], 3),
+    ];
+    for pair in [["+","ADD"],["-","SUB"],["*","MUL"],["/","DIV"],["^","POW"],
+                 ["..","CONCAT"],["==","EQ"],["~=","NE"],[">","LT"]] {
+        rows.push(binary_recipe(pair[0],pair[1],pair[0] == ">"));
+    }
+    rows
+}
+
+fn classify(tokens, handlers) {
+    let patterns = recipes();
+    let templates = patterns.map(|pattern| pattern[0]);
+    let plans = #{};
+    for handler in handlers {
+        if handler.text == "" { continue; }
+        let matched = tokens.match_span(handler.begin,handler.end,templates);
+        if matched != () {
+            let pattern = patterns[matched[0]];
+            plans[handler.opcode.to_string()] = [pattern[1],pattern[2],pattern[3],matched[1]];
+        }
+    }
+    plans
+}
+
+fn constant_at(index) {
+    if index >= this.constants.len { throw "constant index outside prototype"; }
+    let entry = this.constants[index];
+    switch entry[0] {
+        0 => entry[1],
+        1 => lua_number_from_bits(entry[1],"i64"),
+        2 => lua_number_from_bits(entry[1],"u64"),
+        3 | 4 => lua_number_from_bits(entry[1],"f64"),
+        5 => entry[1] != 0,
+        6 => (),
+        _ => throw "constant kind needs numeric conversion",
+    }
+}
+
+fn lane(word, captures, name) {
+    let index = switch captures[name] {
+        "4753" => 0, "5166" => 1, "1596" => 2,
+        _ => throw "unexpected instruction field",
+    };
+    if index >= word.len { throw "operand field absent from packed row"; }
+    word[index]
+}
+
+fn target(index) {
+    if index >= this.instructions.len { throw "branch leaves prototype"; }
+    index
+}
+
+fn proto_name(path) {
+    let name = "proto_"+path;
+    name.replace(".","_");
+    name
+}
+
+fn lower_child(word, path, captured) {
+    let index = word[1];
+    if index >= this.children.len { throw "closure references a missing child"; }
+    let child = this.children[index];
+    let args = [word[0],proto_name(path+"."+index)];
+    if !captured && child.captures.len != 0 { throw "captureless handler targets a captured child"; }
+    if captured {
+        for descriptor in child.captures {
+            if descriptor[0] == 1 { args.push(descriptor[1]); }
+            else {
+                if descriptor[1] >= this.captures.len { throw "forwarded upvalue outside prototype"; }
+                args.push(pfir_upvalue(descriptor[1]));
+            }
+        }
+    }
+    [pfir_asm("CLOSURE",args)]
+}
+
+fn lower_site(record, pc, plan, state, path) {
+    if record[2] != plan[2] || record[3].is_empty() { throw "unsupported operand mode"; }
+    if plan[0] == "CLOSURE" || plan[0] == "CLOSURE_EMPTY" {
+        return this.lower_child(record[3][0],path,plan[0] == "CLOSURE");
+    }
+    if plan[0] == "FOR_SETUP" {
+        let word = record[3][0];
+        let base = word[0];
+        return [
+            pfir_asm("NEWTABLE",[base,pfir_regs(base,3)]),
+            pfir_asm("JUMP",[this.target(word[1])]),
+        ];
+    }
+    if plan[0] == "CLOSE" || plan[0] == "RETURN_TOP" {
+        if plan[0] == "CLOSE" {
+            return [if state.local_captures { pfir_asm("CLOSEUPVALS",[record[3][0][0]]) } else { pfir_asm("NOP",[]) }];
+        }
+        let base = lane(record[3][0],plan[3],"a");
+        if base > 65535 { throw "invalid open return register"; }
+        let exit = [];
+        if state.local_captures { exit.push(pfir_asm("CLOSEUPVALS",[0])); }
+        if state.open_results { exit.push(pfir_asm("RETURN_TOP",[base])); }
+        else { exit.push(pfir_asm("RETURN",[])); }
+        return exit;
+    }
+    let bundle = [];
+    for word in record[3] {
+        let args = [];
+        let captures = plan[3];
+        for spec in plan[1] {
+            if spec == "range_b" || spec == "range_b_minus_1" {
+                let base = lane(word,captures,"a");
+                let count = lane(word,captures,"b") - (if spec == "range_b" { 0 } else { 1 });
+                if count > 255 { throw "register range exceeds 255 values"; }
+                args.push(pfir_regs(base+1,max(0,count)));
+                continue;
+            }
+            let value = if type_of(spec) != "string" { spec } else {
+                switch spec {
+                    "a_plus_1" => lane(word,captures,"a")+1,
+                    "a_plus_2" => lane(word,captures,"a")+2,
+                    "constant_b" => this.constant_at(lane(word,captures,"b")),
+                    "list_first" => lane(word,captures,"c")*100+1,
+                    "target_b" => this.target(lane(word,captures,"b")),
+                    "next" => this.target(pc+1),
+                    _ => lane(word,captures,spec),
+                }
+            };
+            args.push(value);
+        }
+        if (plan[0] == "GETUPVAL" || plan[0] == "SETUPVAL") && args[1] >= this.captures.len {
+            throw "upvalue index outside prototype";
+        }
+        if plan[0] == "JUMP_TABLE" { bundle.push(pfir_jump_table(args[0],this.instructions.len)); }
+        else { bundle.push(pfir_asm(plan[0],args)); }
+    }
+    bundle
+}
+
+fn lift_proto(proto, plans, path, collect_sites) {
+    let bundles = [];
+    let sites = [];
+    let typed = 0;
+    // Only these audited handlers append local capture lists or update the result top.
+    let unknown = proto.instructions.some(|record| record[0] > 68);
+    let state = #{
+        local_captures: unknown || proto.instructions.some(|record| record[0] == 10),
+        open_results: unknown || proto.instructions.some(|record| record[0] == 8),
+    };
+    for pc in 0..proto.instructions.len {
+        let record = proto.instructions[pc];
+        let plan = plans[record[0].to_string()];
+        let issue = ();
+        let bundle = ();
+        if plan == () { issue = "handler has no typed recipe"; }
+        else {
+            // Binding the prototype as the receiver avoids copying its tree per site.
+            try { bundle = proto.lower_site(record,pc,plan,state,path); }
+            catch (error) { issue = error.to_string(); }
+        }
+        if issue != () && !collect_sites { throw "PC "+pc+" opcode "+record[0]+": "+issue; }
+        if bundle != () {
+            typed += 1;
+            if !collect_sites { bundles.push(bundle); }
+        }
+        if collect_sites {
+            let instructions = [];
+            if bundle != () {
+                for inst in bundle { instructions.push(inst.pfir_text()); }
+            }
+            sites.push(#{pc:pc, opcode:record[0], pfir:instructions, issue:issue});
+        }
+    }
+    if !collect_sites {
+        return pfir_linear(proto_name(path),proto.parameters,proto.vararg==1,bundles);
+    }
+    let children = [];
+    for i in 0..proto.children.len {
+        children.push(lift_proto(proto.children[i],plans,path+"."+i,true));
+    }
+    #{path:path,typed_sites:typed,total_sites:sites.len,sites:sites,children:children}
+}
+
+fn export_child(root, plans, path) {
+    let child = root;
+    let parts = path.split(".");
+    if parts[0] != "0" { throw "prototype path must start with 0"; }
+    for index in 1..parts.len {
+        let slot = parse_int(parts[index]);
+        if slot < 0 || slot >= child.children.len { throw "prototype path outside tree"; }
+        child = child.children[slot];
+    }
+    let count = child.captures.len;
+    let factory = pfir_linear("make_child",count,false,[
+        pfir_asm("CLOSURE",[count,proto_name(path),pfir_regs(0,count)]),
+        pfir_asm("RETURN",[count]),
+    ]);
+    let entry = pfir_linear("main",0,false,[
+        pfir_asm("CLOSURE",[0,"make_child"]), pfir_asm("RETURN",[0]),
+    ]);
+    [entry,factory]+lift_tree(child,plans,path)
+}
+
+fn lift_tree(proto, plans, path) {
+    let output = [lift_proto(proto,plans,path,false)];
+    for index in 0..proto.children.len {
+        output += lift_tree(proto.children[index],plans,path+"."+index);
+    }
+    output
+}
+
+let found = discover(source,true);
+let span = found[1];
+let wrapper = slice_bytes(source,0,span[0])+"<pack>"+slice_bytes(source,span[1],bytes(source).len);
+if found[2] != "rice" || sha256(wrapper) != "27a41d2977903bc5f372e73560656e74012d7d30f61ed37f542a3bac845c182b" {
+    throw "unsupported IronBrew1 Rice dispatcher wrapper";
+}
+let tokens = lua_token_buffer(source);
+let anchor = ["h","=","i","[","u","]",";","k","=","h","[","7862","]",";"];
+let dispatch_at = tokens.find_tokens(anchor,0);
+if dispatch_at < 0 || tokens.find_tokens(anchor,dispatch_at+1) >= 0 {
+    throw "IronBrew1 dispatch anchor is missing or ambiguous";
+}
+let original_offset = tokens.token_span(dispatch_at+anchor.len)[0];
+let opcodes = [];
+for op in 0..69 { opcodes.push(op); }
+let handlers = lua_dispatch(source,original_offset,"k",opcodes);
+let plans = classify(tokens,handlers);
+// The wrapper digest binds these handlers' private capture list and stack top.
+plans["27"] = ["RETURN_TOP",[],0,#{a:"4753"}];
+plans["33"] = ["CLOSE",[],0,#{}];
+plans["10"] = ["CLOSURE",[],0,#{}];
+plans["58"] = ["CLOSURE_EMPTY",[],0,#{}];
+plans["38"] = ["FOR_SETUP",[],0,#{}];
+plans["40"] = ["FOR_NEXT",["a","c",false,"target_b","next"],0,#{a:"4753",b:"5166",c:"1596"}];
+plans["57"] = ["FOR_NEXT",["a","c",true,"target_b","next"],0,#{a:"4753",b:"5166",c:"1596"}];
+plans["8"] = ["CALL_OPEN",["a","range_b_minus_1"],0,#{a:"4753",b:"5166"}];
+plans["45"] = ["CALL_FROM_TOP",["a"],0,#{a:"4753"}];
+let decoded = found[0];
+let root = decoded[1];
+if output_mode == "inspect" {
+    return #{matched_handlers:plans.keys().len,handlers:handlers,root:lift_proto(root,plans,"0",true)};
+}
+
+export_child(root,plans,"0.2.0")
+%%

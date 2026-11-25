@@ -1,0 +1,77 @@
+include "format.slatt";
+
+frontend
+let original = "local image = " + lua_quote(input_bytes) + "\n" + `
+local pos = 5
+local function byte()
+    local value = assert(string.byte(image, pos))
+    pos += 1
+    return value
+end
+local function data()
+    local length = byte()
+    local value = string.sub(image, pos, pos + length - 1)
+    pos += length
+    return value
+end
+local blocks = {}
+for id = 0, byte() - 1 do
+    local block = {}
+    for index = 1, byte() do
+        local op = byte()
+        local operands
+        if op == 0 or op == 7 then
+            operands = {byte(), data()}
+        elseif op == 3 then
+            operands = {byte(), byte(), byte()}
+        elseif op == 4 then
+            operands = {byte()}
+        elseif op == 5 then
+            local fn, outputs, inputs = byte(), byte(), byte()
+            operands = {fn, outputs, inputs}
+            for i = 1, outputs + inputs do operands[3+i] = byte() end
+        elseif op == 6 then
+            operands = {}
+            for i = 1, byte() do operands[i] = byte() end
+        else error('unknown packed opcode') end
+        block[index] = {op, operands}
+    end
+    blocks[id] = block
+end
+local env = getfenv()
+local slots, pc = {}, 0
+while true do
+    for _, inst in ipairs(blocks[pc]) do
+        local op, fields = inst[1], inst[2]
+        if op == 0 then slots[fields[1]] = env[fields[2]]
+        elseif op == 7 then slots[fields[1]] = fields[2]
+        elseif op == 3 then pc = slots[fields[1]] and fields[2] or fields[3]
+        elseif op == 4 then pc = fields[1]
+        elseif op == 5 then
+            local fn, results, arguments = slots[fields[1]], fields[2], fields[3]
+            local values = {}
+            for i = 1, arguments do values[i] = slots[fields[3+results+i]] end
+            local result = table.pack(fn(table.unpack(values,1,arguments)))
+            for i = 1, results do slots[fields[3+i]] = result[i] end
+        elseif op == 6 then
+            local values = {}
+            for i, register in ipairs(fields) do values[i] = slots[register] end
+            return table.unpack(values,1,#fields)
+        end
+    end
+end
+`;
+let ast = lua_ast(original);
+let dispatches = ast.nodes("while");
+if dispatches.len != 1 || ast.children(dispatches[0].id).is_empty() { throw "reference dispatch loop missing"; }
+let program = lift_workflow(input_bytes);
+let recovered = program.emit_lua();
+let results = [];
+for condition in ["true", "false", "nil"] {
+    let fixture = "return {choose=" + condition + ",render=function(value) __slatt_probe('render',value); return 'value:'..value,nil end}";
+    let result = luau_replay(original, recovered, fixture);
+    if !result.matched { throw "workflow replay mismatch for " + condition + ": " + result.to_string(); }
+    results.push(#{condition: condition, observation: result.original});
+}
+#{matched: true, cases: results, recovered: recovered, cfg: program.cfg()}
+%%
